@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {
+      "path": "vendor/bundle.js",
+      "kind": { "kind": "toolarge", "adds": 12000, "dels": 20 }
+    },
+    {
+      "path": "assets/logo.png",
+      "kind": { "kind": "binary", "desc": "(binary file)" }
+    }
+  ]
+}

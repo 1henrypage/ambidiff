@@ -1,0 +1,10 @@
+diff --git a/pair.txt b/pair.txt
+index 1111111..2222222 100644
+--- a/pair.txt
++++ b/pair.txt
+@@ -1,2 +1,4 @@
+-const value = compute();
++// fresh comment
++const value = compute_v2();
+ tail context
++appended line

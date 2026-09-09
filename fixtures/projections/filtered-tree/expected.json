@@ -1,0 +1,46 @@
+{
+  "visibleFiles": [2, 0],
+  "tree": [
+    {
+      "depth": 0,
+      "name": "docs",
+      "path": "docs",
+      "isDir": true,
+      "collapsed": false,
+      "commentsTodo": 0,
+      "commentsTotal": 0
+    },
+    {
+      "depth": 1,
+      "name": "readme.md",
+      "path": "docs/readme.md",
+      "isDir": false,
+      "collapsed": false,
+      "fileIndex": 2,
+      "commentsTodo": 0,
+      "commentsTotal": 1
+    },
+    {
+      "depth": 0,
+      "name": "src",
+      "path": "src",
+      "isDir": true,
+      "collapsed": false,
+      "commentsTodo": 0,
+      "commentsTotal": 0
+    },
+    {
+      "depth": 1,
+      "name": "a.rs",
+      "path": "src/a.rs",
+      "isDir": false,
+      "collapsed": false,
+      "fileIndex": 0,
+      "commentsTodo": 1,
+      "commentsTotal": 1
+    }
+  ],
+  "countsSrcA": { "todo": 1, "total": 1 },
+  "countsReadme": { "todo": 0, "total": 1 },
+  "countsSrcB": { "todo": 0, "total": 0 }
+}

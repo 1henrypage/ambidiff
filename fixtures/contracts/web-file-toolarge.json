@@ -1,0 +1,15 @@
+{
+  "type": "file",
+  "id": 3,
+  "path": "vendor/bundle.js",
+  "entry": {
+    "path": "vendor/bundle.js",
+    "status": "modified",
+    "adds": 12000,
+    "dels": 20
+  },
+  "tooLarge": {
+    "adds": 12000,
+    "dels": 20
+  }
+}

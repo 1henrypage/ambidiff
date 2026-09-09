@@ -1,0 +1,5 @@
+{
+  "insertionAtU32Max": "@@ -4294967295,0 +1,1 @@\n+a\n",
+  "trailingGapDiff": "@@ -1,1 +1,1 @@\n a\n",
+  "trailingGapOldTotalLines": 4294967295
+}

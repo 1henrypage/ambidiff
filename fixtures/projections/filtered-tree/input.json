@@ -1,0 +1,12 @@
+{
+  "files": [
+    { "path": "src/a.rs", "status": "modified" },
+    { "path": "src/b.rs", "status": "modified" },
+    { "path": "docs/readme.md", "status": "modified" }
+  ],
+  "comments": [
+    { "id": "c1", "path": "src/a.rs", "status": "open" },
+    { "id": "c2", "path": "docs/readme.md", "status": "resolved" }
+  ],
+  "filter": "annotated"
+}

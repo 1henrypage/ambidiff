@@ -1,0 +1,8 @@
+{
+  "type": "reviewChanged",
+  "review": "{\n  \"ambidiff\": 1,\n  \"review\": \"fixture\",\n  \"revision\": 1,\n  \"source\": {\n    \"kind\": \"git\",\n    \"base\": \"HEAD\"\n  },\n  \"createdAt\": \"2026-09-07T10:00:00Z\",\n  \"updatedAt\": \"2026-09-07T10:00:00Z\",\n  \"comments\": [\n    {\n      \"id\": \"c-7f3a2b1c\",\n      \"rev\": 1,\n      \"status\": \"open\",\n      \"path\": \"src/login.ts\",\n      \"side\": \"new\",\n      \"line\": 2,\n      \"snippet\": \"B\",\n      \"body\": \"why B??\",\n      \"author\": \"henry\",\n      \"createdAt\": \"2026-09-07T10:00:00Z\",\n      \"updatedAt\": \"2026-09-07T10:00:00Z\"\n    }\n  ]\n}\n",
+  "warnings": [],
+  "readOnly": false,
+  "readOnlyReason": null,
+  "generation": 1
+}

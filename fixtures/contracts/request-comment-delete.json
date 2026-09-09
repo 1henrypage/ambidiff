@@ -1,0 +1,45 @@
+{
+  "shape": "comment.delete",
+  "cases": [
+    {
+      "name": "stdio spelling",
+      "payload": {
+        "id": "c-1"
+      },
+      "ok": {
+        "id": "c-1"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "browser spelling",
+      "payload": {
+        "commentId": "c-1"
+      },
+      "ok": {
+        "id": "c-1"
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "missing id",
+      "payload": {},
+      "error": {
+        "kind": "missing",
+        "field": "id"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "numeric id",
+      "payload": {
+        "commentId": 7
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "commentId"
+      },
+      "idField": "commentId"
+    }
+  ]
+}

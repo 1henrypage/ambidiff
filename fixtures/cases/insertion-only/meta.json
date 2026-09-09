@@ -1,0 +1,5 @@
+{
+  "description": "Insertion-only hunk: gap accounting must cover every old line (1..5 and 6..10)",
+  "path": "ins.txt",
+  "oldTotalLines": 10
+}

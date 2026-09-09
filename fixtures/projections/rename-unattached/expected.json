@@ -1,0 +1,7 @@
+{
+  "fileComments": [{ "index": 1, "commentId": "c-file", "wasPath": "old/name.rs" }],
+  "overview": [
+    { "commentId": "c-review", "unattached": false },
+    { "commentId": "c-gone", "unattached": true }
+  ]
+}

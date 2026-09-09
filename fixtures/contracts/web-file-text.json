@@ -1,0 +1,13 @@
+{
+  "type": "file",
+  "id": 3,
+  "path": "src/login.ts",
+  "entry": {
+    "path": "src/login.ts",
+    "status": "modified",
+    "adds": 1,
+    "dels": 0
+  },
+  "raw": "@@ -1,2 +1,3 @@\n a\n+B\n c\n",
+  "oldTotalLines": 5
+}

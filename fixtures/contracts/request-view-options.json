@@ -1,0 +1,81 @@
+{
+  "shape": "viewOptions",
+  "cases": [
+    {
+      "name": "defaults",
+      "payload": {},
+      "ok": {
+        "mode": "unified",
+        "wordDiff": true,
+        "theme": "dark"
+      }
+    },
+    {
+      "name": "null fields take defaults",
+      "payload": {
+        "mode": null,
+        "wordDiff": null,
+        "theme": null
+      },
+      "ok": {
+        "mode": "unified",
+        "wordDiff": true,
+        "theme": "dark"
+      }
+    },
+    {
+      "name": "split without word diff and without highlighting",
+      "payload": {
+        "mode": "split",
+        "wordDiff": false,
+        "theme": "none"
+      },
+      "ok": {
+        "mode": "split",
+        "wordDiff": false,
+        "theme": "none"
+      }
+    },
+    {
+      "name": "light theme",
+      "payload": {
+        "theme": "light"
+      },
+      "ok": {
+        "mode": "unified",
+        "wordDiff": true,
+        "theme": "light"
+      }
+    },
+    {
+      "name": "unknown mode",
+      "payload": {
+        "mode": "sideways"
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "mode"
+      }
+    },
+    {
+      "name": "string wordDiff",
+      "payload": {
+        "wordDiff": "yes"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "wordDiff"
+      }
+    },
+    {
+      "name": "unknown theme",
+      "payload": {
+        "theme": "sepia"
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "theme"
+      }
+    }
+  ]
+}

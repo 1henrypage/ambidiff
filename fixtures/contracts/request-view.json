@@ -1,0 +1,66 @@
+{
+  "shape": "view",
+  "cases": [
+    {
+      "name": "path with defaults",
+      "payload": {
+        "path": "src/a.rs"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "options": {
+          "mode": "unified",
+          "wordDiff": true,
+          "theme": "dark"
+        }
+      }
+    },
+    {
+      "name": "path with options",
+      "payload": {
+        "path": "src/a.rs",
+        "mode": "split",
+        "theme": "light"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "options": {
+          "mode": "split",
+          "wordDiff": true,
+          "theme": "light"
+        }
+      }
+    },
+    {
+      "name": "missing path",
+      "payload": {
+        "mode": "split"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "path"
+      }
+    },
+    {
+      "name": "numeric path",
+      "payload": {
+        "path": 1
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "path"
+      }
+    },
+    {
+      "name": "unknown mode",
+      "payload": {
+        "path": "a",
+        "mode": "x"
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "mode"
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/hpage/ambidiff"
+authors = ["Henry Page"]
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

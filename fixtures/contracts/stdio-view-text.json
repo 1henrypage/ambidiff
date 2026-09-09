@@ -1,0 +1,97 @@
+{
+  "view": {
+    "path": "src/login.ts",
+    "status": "modified",
+    "kind": "text",
+    "mode": "unified",
+    "adds": 1,
+    "dels": 0,
+    "oldMissingNewline": false,
+    "newMissingNewline": false,
+    "rows": [
+      {
+        "type": "hunkHeader",
+        "key": "h:0",
+        "hunk": 0,
+        "text": "@@ -1,2 +1,3 @@"
+      },
+      {
+        "type": "unified",
+        "key": "l:1:1:e40c292c",
+        "hunk": 0,
+        "oldNum": 1,
+        "newNum": 1,
+        "cell": {
+          "kind": "context",
+          "line": 1,
+          "text": "a"
+        }
+      },
+      {
+        "type": "unified",
+        "key": "l:0:2:c70bfb85",
+        "hunk": 0,
+        "oldNum": null,
+        "newNum": 2,
+        "cell": {
+          "kind": "add",
+          "line": 2,
+          "text": "B"
+        }
+      },
+      {
+        "type": "unified",
+        "key": "l:2:3:e60c2c52",
+        "hunk": 0,
+        "oldNum": 2,
+        "newNum": 3,
+        "cell": {
+          "kind": "context",
+          "line": 3,
+          "text": "c"
+        }
+      },
+      {
+        "type": "gap",
+        "key": "g:trailing",
+        "gap": {
+          "id": "trailing",
+          "count": 3,
+          "oldRange": [
+            3,
+            5
+          ],
+          "newRange": [
+            4,
+            6
+          ]
+        }
+      }
+    ]
+  },
+  "comments": [
+    {
+      "comment": {
+        "id": "c-7f3a2b1c",
+        "rev": 1,
+        "status": "open",
+        "path": "src/login.ts",
+        "side": "new",
+        "line": 2,
+        "snippet": "B",
+        "body": "why B??",
+        "author": "henry",
+        "createdAt": "2026-09-07T10:00:00Z",
+        "updatedAt": "2026-09-07T10:00:00Z"
+      },
+      "anchor": {
+        "commentId": "c-7f3a2b1c",
+        "row": 2,
+        "outdated": false,
+        "clamped": false
+      },
+      "wasPath": null
+    }
+  ],
+  "generation": 1
+}

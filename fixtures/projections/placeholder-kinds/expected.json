@@ -1,0 +1,27 @@
+{
+  "views": [
+    {
+      "path": "vendor/bundle.js",
+      "status": "modified",
+      "kind": "toolarge",
+      "mode": "unified",
+      "adds": 12000,
+      "dels": 20,
+      "oldMissingNewline": false,
+      "newMissingNewline": false,
+      "rows": []
+    },
+    {
+      "path": "assets/logo.png",
+      "status": "modified",
+      "kind": "binary",
+      "desc": "(binary file)",
+      "mode": "unified",
+      "adds": 0,
+      "dels": 0,
+      "oldMissingNewline": false,
+      "newMissingNewline": false,
+      "rows": []
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "description": "Unequal change block: greedy pairing picks the similar add; split layout stays positional",
+  "path": "pair.txt",
+  "oldTotalLines": 2
+}

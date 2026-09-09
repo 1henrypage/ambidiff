@@ -1,0 +1,30 @@
+{
+  "type": "snapshot",
+  "id": 2,
+  "appVersion": "0.1.0",
+  "root": "/tmp/review",
+  "review": "{\n  \"ambidiff\": 1,\n  \"review\": \"fixture\",\n  \"revision\": 1,\n  \"source\": {\n    \"kind\": \"git\",\n    \"base\": \"HEAD\"\n  },\n  \"createdAt\": \"2026-09-07T10:00:00Z\",\n  \"updatedAt\": \"2026-09-07T10:00:00Z\",\n  \"comments\": [\n    {\n      \"id\": \"c-7f3a2b1c\",\n      \"rev\": 1,\n      \"status\": \"open\",\n      \"path\": \"src/login.ts\",\n      \"side\": \"new\",\n      \"line\": 2,\n      \"snippet\": \"B\",\n      \"body\": \"why B??\",\n      \"author\": \"henry\",\n      \"createdAt\": \"2026-09-07T10:00:00Z\",\n      \"updatedAt\": \"2026-09-07T10:00:00Z\"\n    }\n  ]\n}\n",
+  "files": [
+    {
+      "path": "src/login.ts",
+      "status": "modified",
+      "adds": 1,
+      "dels": 0
+    }
+  ],
+  "warnings": [],
+  "readOnly": false,
+  "readOnlyReason": null,
+  "sourceError": null,
+  "skipped": [],
+  "comparison": {
+    "old": {
+      "kind": "commit",
+      "oid": "1111111111111111111111111111111111111111"
+    },
+    "new": {
+      "kind": "worktree"
+    }
+  },
+  "generation": 1
+}

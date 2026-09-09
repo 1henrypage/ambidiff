@@ -1,0 +1,44 @@
+[
+  [
+    "hunk",
+    "@@ -1,2 +1,4 @@"
+  ],
+  [
+    "del",
+    1,
+    "const value = compute();",
+    [
+      [
+        14,
+        21
+      ]
+    ]
+  ],
+  [
+    "add",
+    1,
+    "// fresh comment"
+  ],
+  [
+    "add",
+    2,
+    "const value = compute_v2();",
+    [
+      [
+        14,
+        24
+      ]
+    ]
+  ],
+  [
+    "ctx",
+    2,
+    3,
+    "tail context"
+  ],
+  [
+    "add",
+    4,
+    "appended line"
+  ]
+]

@@ -1,0 +1,10 @@
+{
+  "files": [
+    { "path": "new/name.rs", "oldPath": "old/name.rs", "status": "renamed" }
+  ],
+  "comments": [
+    { "id": "c-review", "path": null, "status": "open" },
+    { "id": "c-file", "path": "old/name.rs", "status": "open" },
+    { "id": "c-gone", "path": "deleted/gone.rs", "status": "open" }
+  ]
+}

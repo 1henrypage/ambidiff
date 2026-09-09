@@ -1,0 +1,123 @@
+/* ambidiff browser frontend. Colors mirror the TUI themes; syntax span
+   colors arrive inline from the core (identical RGB across frontends). */
+:root, [data-theme="dark"] {
+  --bg: #161a21; --fg: #c8ccd4; --dim: #6b7280; --gutter: #555c68;
+  --add-bg: #1a3326; --add-word-bg: #24573b; --add-sign: #4ec97a;
+  --remove-bg: #3a1f24; --remove-word-bg: #632f38; --remove-sign: #e56a77;
+  --hunk: #7aa2f7; --gap: #566a8c; --cursor-bg: #2a313f;
+  --banner-bg: #202630; --card-bg: #232435; --card-border: #4a4f68;
+  --open: #e8b44f; --addressed: #7aa2f7; --resolved: #4ec97a; --reopened: #e56a77;
+  --warn: #e8b44f; --search-bg: #5a4a1f; --status-bg: #202630;
+}
+[data-theme="light"] {
+  --bg: #ffffff; --fg: #24292f; --dim: #8b949e; --gutter: #9ba3ad;
+  --add-bg: #ddf4e4; --add-word-bg: #abe2bc; --add-sign: #1a7f37;
+  --remove-bg: #ffe5e7; --remove-word-bg: #ffc0c4; --remove-sign: #cf222e;
+  --hunk: #0a51c4; --gap: #768396; --cursor-bg: #e9edf3;
+  --banner-bg: #f3f5f8; --card-bg: #f6f4ec; --card-border: #c9c3a9;
+  --open: #9a6700; --addressed: #0a51c4; --resolved: #1a7f37; --reopened: #cf222e;
+  --warn: #9a6700; --search-bg: #ffe9a8; --status-bg: #e9edf3;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body, #app { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.5 "SF Mono", ui-monospace, Menlo, monospace;
+}
+#app { display: flex; }
+#tree {
+  width: 300px; min-width: 220px; overflow-y: auto; flex-shrink: 0;
+  border-right: 1px solid var(--card-border); padding: 6px 0;
+  user-select: none;
+}
+#app.tree-hidden #tree { display: none; }
+/* A narrow window has no room for the tree beside the diff; like the TUI,
+   the tree yields to the diff and comes back once there is space. */
+@media (max-width: 699px) { #tree { display: none; } }
+.tree-row { padding: 1px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-row:hover { background: var(--cursor-bg); }
+.tree-row.current { background: var(--cursor-bg); font-weight: 600; }
+.tree-row.cursor { outline: 2px solid var(--hunk); outline-offset: -2px; }
+.tree-row .dir { color: var(--fg); font-weight: 600; }
+.tree-row .stat-a { color: var(--add-sign); }
+.tree-row .stat-d { color: var(--remove-sign); }
+.tree-row .todo { color: var(--open); }
+.tree-row .done { color: var(--resolved); }
+.tree-row .fstatus { color: var(--addressed); margin-right: 4px; }
+#diffwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#banner {
+  background: var(--banner-bg); padding: 4px 12px; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#banner .was { color: var(--warn); }
+#banner .adds { color: var(--add-sign); } #banner .dels { color: var(--remove-sign); }
+#diag {
+  background: var(--search-bg); color: var(--warn); padding: 4px 12px;
+  flex-shrink: 0; font-size: 12px;
+}
+#diag[hidden] { display: none; }
+#diag button { margin-left: 8px; }
+#app.no-gutter .dl .gut { display: none; }
+/* Wrapped (MeasuredLayout) mode: rows grow to fit their content instead of
+   clipping at one fixed-height line; the gutter/sign stay pinned, only the
+   `.celltext` (or a split half's) wraps. */
+#app.wrap .dl { height: auto; min-height: 20px; align-items: flex-start; }
+#app.wrap .dl .celltext { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+#overlay .overlay-error { color: var(--reopened); margin-top: 6px; }
+#overlay .overlay-error[hidden] { display: none; }
+#viewport { flex: 1; overflow: auto; outline: none; position: relative; }
+#spacer { position: relative; }
+#rows { position: absolute; left: 0; right: 0; }
+.dl {
+  height: 20px; line-height: 20px; white-space: pre; display: flex;
+  tab-size: 4; -moz-tab-size: 4;
+}
+.dl.cursor { outline: 1px solid var(--card-border); outline-offset: -1px; }
+.dl .gut { color: var(--gutter); flex-shrink: 0; }
+.dl .celltext { flex: 1; min-width: 0; overflow: hidden; }
+.dl.add { background: var(--add-bg); } .dl.remove { background: var(--remove-bg); }
+.dl .sign-a { color: var(--add-sign); } .dl .sign-d { color: var(--remove-sign); }
+.dl.hunk { color: var(--hunk); }
+.dl.gap { color: var(--gap); cursor: pointer; }
+.dl.banner-row { background: var(--banner-bg); font-weight: 600; }
+.dl.notice { color: var(--warn); }
+.dl.card { background: var(--card-bg); }
+.dl.card .border { color: var(--card-border); }
+.dl .wa { background: var(--add-word-bg); } .dl .wd { background: var(--remove-word-bg); }
+.dl .hit { background: var(--search-bg); }
+.dl .st-open { color: var(--open); } .dl .st-addressed { color: var(--addressed); }
+.dl .st-resolved { color: var(--resolved); } .dl .st-reopened { color: var(--reopened); }
+.dl .qbadge, .dl .obadge { color: var(--warn); font-weight: 600; }
+.split-half { flex: 1; display: flex; min-width: 0; overflow: hidden; white-space: pre; }
+.split-sep { color: var(--card-border); flex-shrink: 0; }
+#statusbar {
+  background: var(--status-bg); padding: 3px 12px; flex-shrink: 0;
+  display: flex; gap: 14px; color: var(--dim); white-space: nowrap; overflow: hidden;
+}
+#statusbar .msg { color: var(--warn); }
+#overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+}
+/* the hidden attribute must win over the flex display above */
+#overlay[hidden] { display: none; }
+#overlay .box {
+  background: var(--banner-bg); border: 1px solid var(--card-border);
+  border-radius: 6px; padding: 14px 16px; min-width: 460px; max-width: 80vw;
+  max-height: 80vh; overflow: auto;
+}
+#overlay textarea {
+  width: 100%; min-height: 80px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--card-border); border-radius: 4px; padding: 6px;
+  font: inherit; resize: vertical;
+}
+#overlay .hint { color: var(--dim); margin-top: 6px; }
+#overlay table { border-collapse: collapse; }
+#overlay td { padding: 1px 10px; }
+#overlay td.chord { color: var(--hunk); text-align: right; }
+#overlay td.desc { color: var(--dim); }
+button {
+  background: var(--cursor-bg); color: var(--fg); border: 1px solid var(--card-border);
+  border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer; margin-right: 6px;
+}
+button:hover { border-color: var(--hunk); }

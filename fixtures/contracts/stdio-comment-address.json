@@ -1,0 +1,14 @@
+{
+  "id": "c-7f3a2b1c",
+  "rev": 1,
+  "status": "addressed",
+  "path": "src/login.ts",
+  "side": "new",
+  "line": 2,
+  "snippet": "B",
+  "body": "why B??",
+  "author": "henry",
+  "createdAt": "2026-09-07T10:00:00Z",
+  "updatedAt": "2026-09-07T10:05:00Z",
+  "response": "B is the new a"
+}

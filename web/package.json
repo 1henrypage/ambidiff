@@ -1,0 +1,16 @@
+{
+  "name": "ambidiff-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "../scripts/build-web.sh",
+    "typecheck": "tsc -p .",
+    "test": "bun test src",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48",
+    "@types/bun": "^1.2",
+    "typescript": "^5.6"
+  }
+}

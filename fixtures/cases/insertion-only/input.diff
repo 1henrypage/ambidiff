@@ -1,0 +1,7 @@
+diff --git a/ins.txt b/ins.txt
+index 1111111..2222222 100644
+--- a/ins.txt
++++ b/ins.txt
+@@ -5,0 +6,2 @@
++alpha new
++beta new

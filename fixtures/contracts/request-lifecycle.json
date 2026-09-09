@@ -1,0 +1,75 @@
+{
+  "shape": "lifecycle",
+  "cases": [
+    {
+      "name": "address with response",
+      "payload": {
+        "id": "c-1",
+        "response": "done"
+      },
+      "ok": {
+        "id": "c-1",
+        "response": "done"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "resolve without response",
+      "payload": {
+        "commentId": "c-1"
+      },
+      "ok": {
+        "id": "c-1",
+        "response": null
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "blank response is omitted",
+      "payload": {
+        "commentId": "c-1",
+        "response": "   "
+      },
+      "ok": {
+        "id": "c-1",
+        "response": null
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "null response is omitted",
+      "payload": {
+        "id": "c-1",
+        "response": null
+      },
+      "ok": {
+        "id": "c-1",
+        "response": null
+      },
+      "idField": "id"
+    },
+    {
+      "name": "missing id",
+      "payload": {
+        "response": "x"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "commentId"
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "numeric response",
+      "payload": {
+        "id": "c-1",
+        "response": 3
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "response"
+      },
+      "idField": "id"
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "stdio": [
+    {
+      "id": 1,
+      "method": "initialize",
+      "params": {}
+    },
+    {
+      "id": 2,
+      "method": "review",
+      "params": {}
+    },
+    {
+      "id": 3,
+      "method": "files",
+      "params": {}
+    },
+    {
+      "id": 4,
+      "method": "view",
+      "params": {
+        "path": "src/login.ts",
+        "mode": "unified",
+        "wordDiff": true,
+        "theme": "dark"
+      }
+    },
+    {
+      "id": 5,
+      "method": "expand",
+      "params": {
+        "path": "src/login.ts",
+        "gapId": "trailing",
+        "mode": "unified"
+      }
+    },
+    {
+      "id": 6,
+      "method": "commands",
+      "params": {}
+    },
+    {
+      "id": 7,
+      "method": "comment.add",
+      "params": {
+        "path": "src/login.ts",
+        "line": 2,
+        "body": "why B??"
+      }
+    },
+    {
+      "id": 8,
+      "method": "comment.edit",
+      "params": {
+        "id": "c-7f3a2b1c",
+        "body": "why B?? (edited)"
+      }
+    },
+    {
+      "id": 9,
+      "method": "comment.delete",
+      "params": {
+        "id": "c-7f3a2b1c"
+      }
+    },
+    {
+      "id": 10,
+      "method": "comment.address",
+      "params": {
+        "id": "c-7f3a2b1c",
+        "response": "B is the new a"
+      }
+    },
+    {
+      "id": 11,
+      "method": "comment.resolve",
+      "params": {
+        "id": "c-7f3a2b1c"
+      }
+    },
+    {
+      "id": 12,
+      "method": "comment.reopen",
+      "params": {
+        "id": "c-7f3a2b1c"
+      }
+    },
+    {
+      "id": 13,
+      "method": "rev.bump",
+      "params": {}
+    },
+    {
+      "id": 14,
+      "method": "shutdown"
+    }
+  ],
+  "web": [
+    {
+      "type": "auth",
+      "token": "0123456789abcdef0123456789abcdef"
+    },
+    {
+      "type": "refresh",
+      "id": 2
+    },
+    {
+      "type": "getFile",
+      "id": 3,
+      "path": "src/login.ts"
+    },
+    {
+      "type": "getSrc",
+      "id": 4,
+      "path": "src/login.ts"
+    },
+    {
+      "type": "comment.add",
+      "id": 5,
+      "path": "src/login.ts",
+      "side": "new",
+      "line": 2,
+      "body": "why B??"
+    },
+    {
+      "type": "comment.edit",
+      "id": 6,
+      "commentId": "c-7f3a2b1c",
+      "body": "why B?? (edited)"
+    },
+    {
+      "type": "comment.delete",
+      "id": 7,
+      "commentId": "c-7f3a2b1c"
+    },
+    {
+      "type": "comment.address",
+      "id": 8,
+      "commentId": "c-7f3a2b1c",
+      "response": "B is the new a"
+    },
+    {
+      "type": "comment.resolve",
+      "id": 9,
+      "commentId": "c-7f3a2b1c"
+    },
+    {
+      "type": "comment.reopen",
+      "id": 10,
+      "commentId": "c-7f3a2b1c"
+    },
+    {
+      "type": "rev.bump",
+      "id": 11
+    }
+  ]
+}

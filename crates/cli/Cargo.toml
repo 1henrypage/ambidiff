@@ -1,0 +1,35 @@
+[package]
+name = "ambidiff"
+description = "Git-backed diff review for humans and AI agents: TUI, nvim engine, and browser frontends over one core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ambidiff"
+path = "src/main.rs"
+
+[dependencies]
+ambidiff-core = { path = "../core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ratatui = "0.29"
+crossterm = "0.28"
+tungstenite = "0.24"
+include_dir = "0.7"
+unicode-width = "0.2"
+# Web session token entropy with an explicit failure result (no fallback).
+getrandom = "0.3"
+# Exclusive temp files for agent-setup writes (managed blocks, skill file).
+tempfile = "3"
+
+[dev-dependencies]
+expectrl = "0.7"
+
+[lints]
+workspace = true

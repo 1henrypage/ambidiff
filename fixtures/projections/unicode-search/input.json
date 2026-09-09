@@ -1,0 +1,5 @@
+{
+  "path": "greeting.txt",
+  "diff": "@@ -1 +1 @@\n-你好x\n+你好y\n",
+  "query": "好"
+}

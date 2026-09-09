@@ -1,0 +1,45 @@
+{
+  "protocolVersion": 1,
+  "appVersion": "0.1.0",
+  "root": "/tmp/review",
+  "review": {
+    "name": "fixture",
+    "revision": 1,
+    "counts": {
+      "open": 1,
+      "addressed": 0,
+      "resolved": 0,
+      "reopened": 0
+    },
+    "readOnly": false,
+    "readOnlyReason": null,
+    "warnings": []
+  },
+  "generation": 1,
+  "sourceError": null,
+  "comparison": {
+    "old": {
+      "kind": "commit",
+      "oid": "1111111111111111111111111111111111111111"
+    },
+    "new": {
+      "kind": "worktree"
+    }
+  },
+  "methods": [
+    "initialize",
+    "review",
+    "files",
+    "view",
+    "expand",
+    "commands",
+    "comment.add",
+    "comment.edit",
+    "comment.delete",
+    "comment.address",
+    "comment.resolve",
+    "comment.reopen",
+    "rev.bump",
+    "shutdown"
+  ]
+}

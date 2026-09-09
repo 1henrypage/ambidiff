@@ -1,0 +1,69 @@
+{
+  "shape": "expand",
+  "cases": [
+    {
+      "name": "gap with default options",
+      "payload": {
+        "path": "src/a.rs",
+        "gapId": "before:0"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "gapId": "before:0",
+        "options": {
+          "mode": "unified",
+          "wordDiff": true,
+          "theme": "dark"
+        }
+      }
+    },
+    {
+      "name": "gap in split mode",
+      "payload": {
+        "path": "src/a.rs",
+        "gapId": "trailing",
+        "mode": "split"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "gapId": "trailing",
+        "options": {
+          "mode": "split",
+          "wordDiff": true,
+          "theme": "dark"
+        }
+      }
+    },
+    {
+      "name": "missing gapId",
+      "payload": {
+        "path": "src/a.rs"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "gapId"
+      }
+    },
+    {
+      "name": "missing path",
+      "payload": {
+        "gapId": "before:0"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "path"
+      }
+    },
+    {
+      "name": "numeric gapId",
+      "payload": {
+        "path": "a",
+        "gapId": 0
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "gapId"
+      }
+    }
+  ]
+}

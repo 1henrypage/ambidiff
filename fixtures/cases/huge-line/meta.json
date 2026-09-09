@@ -1,0 +1,5 @@
+{
+  "description": "Word-diff line cap: exactly 500 bytes diffs, 501 bytes is skipped",
+  "path": "wide.txt",
+  "oldTotalLines": 3
+}

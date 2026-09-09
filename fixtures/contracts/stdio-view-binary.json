@@ -1,0 +1,16 @@
+{
+  "view": {
+    "path": "logo.png",
+    "status": "modified",
+    "kind": "binary",
+    "desc": "(binary file)",
+    "mode": "unified",
+    "adds": 0,
+    "dels": 0,
+    "oldMissingNewline": false,
+    "newMissingNewline": false,
+    "rows": []
+  },
+  "comments": [],
+  "generation": 1
+}

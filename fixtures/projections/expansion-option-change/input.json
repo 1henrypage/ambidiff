@@ -1,0 +1,8 @@
+{
+  "path": "f.rs",
+  "diff": "@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+  "oldTotalLines": 6,
+  "gapId": "trailing",
+  "content": "a\nB\nc\nd\ne\nf\n",
+  "generation": 1
+}

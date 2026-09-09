@@ -1,0 +1,5 @@
+{
+  "description": "Rename headers skipped; leading and trailing gaps; asymmetric word-diff (minus side unchanged)",
+  "path": "new/name.py",
+  "oldTotalLines": 5
+}

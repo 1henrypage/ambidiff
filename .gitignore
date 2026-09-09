@@ -1,0 +1,8 @@
+/target
+node_modules/
+web/node_modules/
+*.profraw
+.DS_Store
+/web/pkg
+/web/test-results
+/web/playwright-report

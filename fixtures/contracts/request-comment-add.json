@@ -1,0 +1,272 @@
+{
+  "shape": "comment.add",
+  "cases": [
+    {
+      "name": "review-level comment",
+      "payload": {
+        "body": "b"
+      },
+      "ok": {
+        "path": null,
+        "side": null,
+        "line": null,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "file-level comment",
+      "payload": {
+        "path": "src/a.rs",
+        "body": "b"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": null,
+        "line": null,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "line comment with omitted side defaults to new",
+      "payload": {
+        "path": "src/a.rs",
+        "line": 3,
+        "body": "b"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": "new",
+        "line": 3,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "explicit old side is kept",
+      "payload": {
+        "path": "src/a.rs",
+        "line": 3,
+        "side": "old",
+        "body": "b"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": "old",
+        "line": 3,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "range with author",
+      "payload": {
+        "path": "src/a.rs",
+        "line": 3,
+        "endLine": 5,
+        "body": "b",
+        "author": "agent"
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": "new",
+        "line": 3,
+        "endLine": 5,
+        "body": "b",
+        "author": "agent"
+      }
+    },
+    {
+      "name": "null fields are omitted",
+      "payload": {
+        "path": null,
+        "side": null,
+        "line": null,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      },
+      "ok": {
+        "path": null,
+        "side": null,
+        "line": null,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "u32 max line is representable",
+      "payload": {
+        "path": "a",
+        "line": 4294967295,
+        "body": "b"
+      },
+      "ok": {
+        "path": "a",
+        "side": "new",
+        "line": 4294967295,
+        "endLine": null,
+        "body": "b",
+        "author": null
+      }
+    },
+    {
+      "name": "line above u32 is out of range, not truncated",
+      "payload": {
+        "path": "a",
+        "line": 4294967297,
+        "body": "b"
+      },
+      "error": {
+        "kind": "outOfRange",
+        "field": "line"
+      }
+    },
+    {
+      "name": "line 4294967296 is out of range",
+      "payload": {
+        "path": "a",
+        "line": 4294967296,
+        "body": "b"
+      },
+      "error": {
+        "kind": "outOfRange",
+        "field": "line"
+      }
+    },
+    {
+      "name": "line zero is out of range",
+      "payload": {
+        "path": "a",
+        "line": 0,
+        "body": "b"
+      },
+      "error": {
+        "kind": "outOfRange",
+        "field": "line"
+      }
+    },
+    {
+      "name": "negative line is out of range",
+      "payload": {
+        "path": "a",
+        "line": -1,
+        "body": "b"
+      },
+      "error": {
+        "kind": "outOfRange",
+        "field": "line"
+      }
+    },
+    {
+      "name": "fractional line is out of range",
+      "payload": {
+        "path": "a",
+        "line": 2.5,
+        "body": "b"
+      },
+      "error": {
+        "kind": "outOfRange",
+        "field": "line"
+      }
+    },
+    {
+      "name": "string line is the wrong type",
+      "payload": {
+        "path": "a",
+        "line": "2",
+        "body": "b"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "line"
+      }
+    },
+    {
+      "name": "string endLine is the wrong type",
+      "payload": {
+        "path": "a",
+        "line": 1,
+        "endLine": "3",
+        "body": "b"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "endLine"
+      }
+    },
+    {
+      "name": "unknown side fails instead of defaulting",
+      "payload": {
+        "path": "a",
+        "line": 1,
+        "side": "left",
+        "body": "b"
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "side"
+      }
+    },
+    {
+      "name": "numeric side is the wrong type",
+      "payload": {
+        "path": "a",
+        "line": 1,
+        "side": 1,
+        "body": "b"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "side"
+      }
+    },
+    {
+      "name": "missing body",
+      "payload": {
+        "path": "a"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "body"
+      }
+    },
+    {
+      "name": "numeric body is the wrong type",
+      "payload": {
+        "body": 5
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "body"
+      }
+    },
+    {
+      "name": "numeric path is the wrong type",
+      "payload": {
+        "path": 5,
+        "body": "b"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "path"
+      }
+    },
+    {
+      "name": "array payload is not an object",
+      "payload": [
+        1
+      ],
+      "error": {
+        "kind": "wrongType",
+        "field": ""
+      }
+    }
+  ]
+}

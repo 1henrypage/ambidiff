@@ -1,0 +1,12 @@
+diff --git a/old/name.py b/new/name.py
+similarity index 90%
+rename from old/name.py
+rename to new/name.py
+index 1111111..2222222 100644
+--- a/old/name.py
++++ b/new/name.py
+@@ -2,3 +2,3 @@ def f():
+ x = 1
+-print(x)
++print(x + 1)
+ return x

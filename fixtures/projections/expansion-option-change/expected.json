@@ -1,0 +1,16 @@
+{
+  "afterExpand": {
+    "mode": "unified",
+    "rowCount": 8,
+    "hasGap": false
+  },
+  "afterSetOptionsSplit": {
+    "mode": "split",
+    "rowCount": 7,
+    "hasGap": false,
+    "lastRowLeftText": "f",
+    "lastRowLeftLine": 6,
+    "lastRowRightText": "f",
+    "lastRowRightLine": 6
+  }
+}

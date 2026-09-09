@@ -1,0 +1,75 @@
+{
+  "shape": "comment.edit",
+  "cases": [
+    {
+      "name": "stdio spelling",
+      "payload": {
+        "id": "c-1",
+        "body": "new"
+      },
+      "ok": {
+        "id": "c-1",
+        "body": "new"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "browser spelling",
+      "payload": {
+        "commentId": "c-1",
+        "body": "new"
+      },
+      "ok": {
+        "id": "c-1",
+        "body": "new"
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "missing id",
+      "payload": {
+        "body": "new"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "id"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "stdio id under the browser spelling is missing",
+      "payload": {
+        "id": "c-1",
+        "body": "new"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "commentId"
+      },
+      "idField": "commentId"
+    },
+    {
+      "name": "missing body",
+      "payload": {
+        "id": "c-1"
+      },
+      "error": {
+        "kind": "missing",
+        "field": "body"
+      },
+      "idField": "id"
+    },
+    {
+      "name": "numeric body",
+      "payload": {
+        "id": "c-1",
+        "body": 1
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "body"
+      },
+      "idField": "id"
+    }
+  ]
+}

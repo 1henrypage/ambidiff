@@ -1,0 +1,5 @@
+{
+  "description": "CRLF content keeps its carriage returns; CR is whitespace-class for word-diff",
+  "path": "win.txt",
+  "oldTotalLines": 2
+}

@@ -1,0 +1,5 @@
+{
+  "description": "Plain one-hunk modification with a single-token word-diff range",
+  "path": "src/calc.rs",
+  "oldTotalLines": 4
+}

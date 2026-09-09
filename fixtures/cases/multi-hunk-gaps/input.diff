@@ -1,0 +1,14 @@
+diff --git a/list.txt b/list.txt
+index 1111111..2222222 100644
+--- a/list.txt
++++ b/list.txt
+@@ -3,3 +3,3 @@
+ three
+-four
++FOUR
+ five
+@@ -9,3 +9,3 @@
+ nine
+-ten
++TEN
+ eleven

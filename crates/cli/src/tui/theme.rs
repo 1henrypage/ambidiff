@@ -1,0 +1,100 @@
+//! TUI color themes (dark and light), aligned with the core's syntect theme
+//! choice so syntax colors and chrome share an appearance.
+
+use ambidiff_core::highlight::ThemeChoice;
+use ratatui::style::Color;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    pub choice: ThemeChoice,
+    pub bg: Color,
+    pub fg: Color,
+    pub dim: Color,
+    pub gutter: Color,
+    pub add_bg: Color,
+    pub add_word_bg: Color,
+    pub add_sign: Color,
+    pub remove_bg: Color,
+    pub remove_word_bg: Color,
+    pub remove_sign: Color,
+    pub hunk_fg: Color,
+    pub gap_fg: Color,
+    pub cursor_bg: Color,
+    pub tree_selected_bg: Color,
+    pub banner_bg: Color,
+    pub comment_bg: Color,
+    pub comment_border: Color,
+    pub open_fg: Color,
+    pub addressed_fg: Color,
+    pub resolved_fg: Color,
+    pub reopened_fg: Color,
+    pub warn_fg: Color,
+    pub search_bg: Color,
+    pub status_bg: Color,
+    pub status_fg: Color,
+    pub overlay_bg: Color,
+}
+
+pub fn dark() -> Theme {
+    Theme {
+        choice: ThemeChoice::Dark,
+        bg: Color::Rgb(0x16, 0x1a, 0x21),
+        fg: Color::Rgb(0xc8, 0xcc, 0xd4),
+        dim: Color::Rgb(0x6b, 0x72, 0x80),
+        gutter: Color::Rgb(0x55, 0x5c, 0x68),
+        add_bg: Color::Rgb(0x1a, 0x33, 0x26),
+        add_word_bg: Color::Rgb(0x24, 0x57, 0x3b),
+        add_sign: Color::Rgb(0x4e, 0xc9, 0x7a),
+        remove_bg: Color::Rgb(0x3a, 0x1f, 0x24),
+        remove_word_bg: Color::Rgb(0x63, 0x2f, 0x38),
+        remove_sign: Color::Rgb(0xe5, 0x6a, 0x77),
+        hunk_fg: Color::Rgb(0x7a, 0xa2, 0xf7),
+        gap_fg: Color::Rgb(0x56, 0x6a, 0x8c),
+        cursor_bg: Color::Rgb(0x2a, 0x31, 0x3f),
+        tree_selected_bg: Color::Rgb(0x2a, 0x31, 0x3f),
+        banner_bg: Color::Rgb(0x20, 0x26, 0x30),
+        comment_bg: Color::Rgb(0x23, 0x24, 0x35),
+        comment_border: Color::Rgb(0x4a, 0x4f, 0x68),
+        open_fg: Color::Rgb(0xe8, 0xb4, 0x4f),
+        addressed_fg: Color::Rgb(0x7a, 0xa2, 0xf7),
+        resolved_fg: Color::Rgb(0x4e, 0xc9, 0x7a),
+        reopened_fg: Color::Rgb(0xe5, 0x6a, 0x77),
+        warn_fg: Color::Rgb(0xe8, 0xb4, 0x4f),
+        search_bg: Color::Rgb(0x5a, 0x4a, 0x1f),
+        status_bg: Color::Rgb(0x20, 0x26, 0x30),
+        status_fg: Color::Rgb(0xa8, 0xb0, 0xbe),
+        overlay_bg: Color::Rgb(0x1c, 0x21, 0x2b),
+    }
+}
+
+pub fn light() -> Theme {
+    Theme {
+        choice: ThemeChoice::Light,
+        bg: Color::Rgb(0xff, 0xff, 0xff),
+        fg: Color::Rgb(0x24, 0x29, 0x2f),
+        dim: Color::Rgb(0x8b, 0x94, 0x9e),
+        gutter: Color::Rgb(0x9b, 0xa3, 0xad),
+        add_bg: Color::Rgb(0xdd, 0xf4, 0xe4),
+        add_word_bg: Color::Rgb(0xab, 0xe2, 0xbc),
+        add_sign: Color::Rgb(0x1a, 0x7f, 0x37),
+        remove_bg: Color::Rgb(0xff, 0xe5, 0xe7),
+        remove_word_bg: Color::Rgb(0xff, 0xc0, 0xc4),
+        remove_sign: Color::Rgb(0xcf, 0x22, 0x2e),
+        hunk_fg: Color::Rgb(0x0a, 0x51, 0xc4),
+        gap_fg: Color::Rgb(0x76, 0x83, 0x96),
+        cursor_bg: Color::Rgb(0xe9, 0xed, 0xf3),
+        tree_selected_bg: Color::Rgb(0xe9, 0xed, 0xf3),
+        banner_bg: Color::Rgb(0xf3, 0xf5, 0xf8),
+        comment_bg: Color::Rgb(0xf6, 0xf4, 0xec),
+        comment_border: Color::Rgb(0xc9, 0xc3, 0xa9),
+        open_fg: Color::Rgb(0x9a, 0x67, 0x00),
+        addressed_fg: Color::Rgb(0x0a, 0x51, 0xc4),
+        resolved_fg: Color::Rgb(0x1a, 0x7f, 0x37),
+        reopened_fg: Color::Rgb(0xcf, 0x22, 0x2e),
+        warn_fg: Color::Rgb(0x9a, 0x67, 0x00),
+        search_bg: Color::Rgb(0xff, 0xe9, 0xa8),
+        status_bg: Color::Rgb(0xe9, 0xed, 0xf3),
+        status_fg: Color::Rgb(0x44, 0x4c, 0x56),
+        overlay_bg: Color::Rgb(0xf3, 0xf5, 0xf8),
+    }
+}

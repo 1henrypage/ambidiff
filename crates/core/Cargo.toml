@@ -1,0 +1,48 @@
+[package]
+name = "ambidiff-core"
+description = "Core engine for ambidiff: diff model, review store, word-diff, rows, anchors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# cdylib for the wasm-bindgen browser build; rlib for everything native.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# native: filesystem, subprocess, and file-watching code (git source, review store
+# IO, watch controller). Disabled for the wasm32 build, which only needs the pure
+# derivation layer (parser, rows, word-diff, highlighting, anchors, lifecycle).
+default = ["native"]
+native = ["dep:notify", "dep:tempfile", "dep:libc"]
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+notify = { version = "8", optional = true }
+tempfile = { version = "3", optional = true }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+wasm-bindgen = { version = "0.2", optional = true }
+
+# Root-relative IO (openat/readlinkat) is unix-only; wasm32 is not unix and
+# never enables `native`, so this never reaches the browser build.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[dev-dependencies]
+include_dir = "0.7"
+serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+{
+  "description": "Leading, between-hunk, and trailing gaps; similarity gate rejects whole-token rewrites",
+  "path": "list.txt",
+  "oldTotalLines": 12
+}

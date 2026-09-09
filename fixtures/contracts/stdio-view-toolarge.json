@@ -1,0 +1,15 @@
+{
+  "view": {
+    "path": "vendor/bundle.js",
+    "status": "modified",
+    "kind": "toolarge",
+    "mode": "unified",
+    "adds": 12000,
+    "dels": 20,
+    "oldMissingNewline": false,
+    "newMissingNewline": false,
+    "rows": []
+  },
+  "comments": [],
+  "generation": 1
+}

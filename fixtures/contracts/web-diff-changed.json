@@ -1,0 +1,28 @@
+{
+  "type": "diffChanged",
+  "files": [
+    {
+      "path": "src/login.ts",
+      "status": "modified",
+      "adds": 1,
+      "dels": 0
+    }
+  ],
+  "skipped": [
+    {
+      "display": "d\\xe9p\\xf4t/notes.txt",
+      "reason": "nonUtf8"
+    }
+  ],
+  "sourceError": null,
+  "comparison": {
+    "old": {
+      "kind": "commit",
+      "oid": "1111111111111111111111111111111111111111"
+    },
+    "new": {
+      "kind": "worktree"
+    }
+  },
+  "generation": 2
+}

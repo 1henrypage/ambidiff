@@ -1,0 +1,10 @@
+diff --git a/src/calc.rs b/src/calc.rs
+index 1111111..2222222 100644
+--- a/src/calc.rs
++++ b/src/calc.rs
+@@ -1,4 +1,4 @@ fn top()
+ let a = 1;
+-let b = foo(a);
++let b = bar(a);
+ let c = 3;
+ let d = 4;
