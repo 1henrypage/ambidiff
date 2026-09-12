@@ -517,6 +517,20 @@ fn split_left_cell_comment_is_old_side() {
         "left cell click",
         "saved comment body renders",
     );
+
+    // Cards wrap in split mode too, not just unified. A resize forces a
+    // full repaint (ratatui only redraws changed cells otherwise, and this
+    // short card's own text may not move at all once wrapped), so the
+    // card reappearing here proves wrap didn't break rendering in split
+    // mode rather than merely that unchanged cells were left alone.
+    send(&mut session, "W");
+    resize(&mut session, 79, 24);
+    wait_for(
+        &mut session,
+        "left cell click",
+        "card still renders once wrapped in split mode",
+    );
+
     send(&mut session, "q");
     wait_for_exit(&mut session);
 
@@ -606,6 +620,45 @@ fn resize_reflows_wrapped_rows() {
         &mut session,
         "MARK",
         "reflow keeps a marker reachable after a narrower resize",
+    );
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+/// Wrap applies to comment cards too: a long card body must reflow to the
+/// new pane width on resize, the same way a long code line does.
+#[test]
+fn wrap_reflows_comment_cards_on_resize() {
+    let (_dir, root) = scratch_repo();
+    let words: String = (1..=40).map(|i| format!("w{i:02} ")).collect();
+    let body = format!("{words}ZULUTAIL");
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["comment", "add", "-p", "src/app.ts", "-m", &body])
+        .current_dir(&root)
+        .output()
+        .expect("comment add");
+    assert!(out.status.success(), "comment add failed: {out:?}");
+
+    let mut session = spawn_tui(&root);
+    resize(&mut session, 100, 24);
+    wait_for(&mut session, "src/app.ts", "initial render");
+
+    send(&mut session, "W"); // toggle wrap
+    wait_for(
+        &mut session,
+        "ZULUTAIL",
+        "wrapped card reveals its tail word at 100 cols",
+    );
+
+    // Drain the still-buffered width-100 frame first, same reasoning as
+    // resize_reflows_wrapped_rows: otherwise a leftover occurrence could
+    // satisfy the next wait_for before the reflowed repaint arrives.
+    drain(&mut session);
+    resize(&mut session, 60, 24);
+    wait_for(
+        &mut session,
+        "ZULUTAIL",
+        "card reflows and keeps its tail word reachable after a narrower resize",
     );
     send(&mut session, "q");
     wait_for_exit(&mut session);

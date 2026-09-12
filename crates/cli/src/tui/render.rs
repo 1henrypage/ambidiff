@@ -24,8 +24,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::app::{App, DRow, FileTarget, Focus, Overlay};
 use super::theme::Theme;
+use super::wrap;
 
-const TAB_WIDTH: usize = 4;
 const TREE_WIDTH: u16 = 34;
 
 /// Sanitise one piece of metadata before it reaches the screen (B26): tree
@@ -76,6 +76,10 @@ pub struct Layout {
     /// Absolute column of the split separator, when in split mode.
     pub split_sep_col: Option<u16>,
     pub content_width: usize,
+    /// Wrap budget for comment card bodies: `pane_width - CARD_PREFIX`, not
+    /// `content_width - CARD_PREFIX` - a card has no gutter or sign column,
+    /// so its true budget is the pane width minus its own border chrome.
+    pub card_width: usize,
 }
 
 impl Layout {
@@ -148,6 +152,9 @@ pub fn layout(inputs: &LayoutInputs, area: Rect) -> Layout {
 
     let gutter = gutter_width_for(inputs.line_numbers, inputs.max_line_number);
     let content_width = (diff.width as usize).saturating_sub(gutter + 3).max(20);
+    let card_width = (diff.width as usize)
+        .saturating_sub(wrap::CARD_PREFIX)
+        .max(wrap::MIN_CARD_WIDTH);
     let split_sep_col = match inputs.mode {
         ViewMode::Split => {
             let (_, _, _, sep) = split_geometry(diff.width as usize, inputs.line_numbers);
@@ -168,6 +175,7 @@ pub fn layout(inputs: &LayoutInputs, area: Rect) -> Layout {
         gutter,
         split_sep_col,
         content_width,
+        card_width,
     }
 }
 
@@ -414,7 +422,7 @@ fn render_drow(app: &App, pos: usize, width: usize, gutter: usize) -> Line<'stat
             let clean_text = clean(text);
             let mut spans = vec![
                 Span::styled(
-                    "  \u{2502} ".to_string(),
+                    wrap::CARD_BORDER.to_string(),
                     Style::default().fg(theme.comment_border).bg(card_bg),
                 ),
                 Span::styled(clean_text, Style::default().fg(theme.fg).bg(card_bg)),
@@ -575,15 +583,7 @@ fn comment_head_line(app: &App, pane_idx: usize, is_cursor: bool, width: usize) 
 /// Pad a line's spans with `bg` out to `width` display columns so card and
 /// banner backgrounds span the full pane instead of ending mid-row.
 fn pad_line(spans: &mut Vec<Span<'static>>, width: usize, bg: ratatui::style::Color) {
-    let used: usize = spans
-        .iter()
-        .map(|s| {
-            s.content
-                .chars()
-                .map(|c| c.width().unwrap_or(0))
-                .sum::<usize>()
-        })
-        .sum();
+    let used: usize = spans.iter().map(|s| wrap::display_width(&s.content)).sum();
     if used < width {
         spans.push(Span::styled(
             " ".repeat(width - used),
@@ -934,24 +934,8 @@ fn styled_content(
         }
         let raw = &window[seg_start..seg_end];
         let clean = sanitize_line(raw);
-        let expanded = expand_tabs(&clean, &mut column);
+        let expanded = wrap::expand_tabs(&clean, &mut column);
         out.push(Span::styled(expanded, style));
-    }
-    out
-}
-
-/// Expand tabs against a running display column (tab stops every 4).
-fn expand_tabs(text: &str, column: &mut usize) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c == '\t' {
-            let advance = TAB_WIDTH - (*column % TAB_WIDTH);
-            out.extend(std::iter::repeat_n(' ', advance));
-            *column += advance;
-        } else {
-            out.push(c);
-            *column += c.width().unwrap_or(0);
-        }
     }
     out
 }
@@ -1070,7 +1054,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        " esc or ? closes help; split view has no wrap",
+        " esc or ? closes help \u{b7} wrap: comment cards always, code rows unified only",
         Style::default().fg(theme.dim),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1245,6 +1229,72 @@ mod tests {
         assert!(
             content.contains("review r"),
             "banner should show the review name; got: {content}"
+        );
+    }
+
+    /// The one assertion nothing else can make: every body row of a wrapped
+    /// card starts with the card border and the closing row starts with the
+    /// foot glyph - catching a continuation row that lost its left rule.
+    #[test]
+    fn wrapped_card_rows_keep_the_left_border_unbroken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ambidiff_core::store::Store::new(dir.path());
+        let mut review = ambidiff_core::review::ReviewFile::new(
+            "r".into(),
+            ambidiff_core::review::Source::git(None),
+            "t",
+        );
+        review.comments.push(ambidiff_core::review::Comment {
+            id: "c-1".into(),
+            rev: 1,
+            status: ambidiff_core::review::Status::Open,
+            path: None,
+            side: None,
+            line: None,
+            end_line: None,
+            snippet: None,
+            body: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi \
+                omicron pi rho sigma tau"
+                .into(),
+            response: None,
+            author: "t".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            extra: Default::default(),
+        });
+        store.init(&review).expect("init");
+        let mut app = super::super::app::App::open(store, false, false).expect("open");
+        app.toggle_wrap();
+
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, &mut app)).expect("draw");
+
+        let buf = terminal.backend().buffer();
+        let width = buf.area.width;
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+
+        let body_rows: Vec<&String> = rows
+            .iter()
+            .filter(|r| r.trim_start_matches(' ').starts_with('\u{2502}'))
+            .collect();
+        assert!(
+            !body_rows.is_empty(),
+            "expected at least one wrapped card row; rows: {rows:?}"
+        );
+        for row in &body_rows {
+            assert!(
+                row.starts_with("  \u{2502} "),
+                "wrapped card row lost its border: {row:?}"
+            );
+        }
+
+        let foot_row = rows.iter().find(|r| r.trim_start().starts_with('\u{2514}'));
+        assert!(
+            foot_row.is_some_and(|r| r.starts_with("  \u{2514}\u{2500}")),
+            "card foot must keep its border: {foot_row:?}"
         );
     }
 }

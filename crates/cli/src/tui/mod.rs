@@ -5,6 +5,7 @@ mod app;
 mod editor;
 mod render;
 mod theme;
+mod wrap;
 
 use std::time::Duration;
 
@@ -72,6 +73,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
                 }
             }
             dirty |= app.poll_watch();
+            // A resize whose reflow rebuilt wrapped rows this frame: paint
+            // it now instead of leaving the stale chunking on screen until
+            // the next input event (B25/A6).
+            dirty |= app.take_reflow_dirty();
             // A status message that just aged out changes the status bar.
             dirty |= app.take_expired_status();
         }

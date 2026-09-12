@@ -214,9 +214,14 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
     }
   }
 
-  function commentCardLine(kind: "chead" | "cline" | "cfoot", record: CommentRecord, text?: string): HTMLElement {
+  function commentCardLine(
+    kind: "chead" | "cline" | "cfoot",
+    record: CommentRecord,
+    text?: string,
+    role?: "response",
+  ): HTMLElement {
     const div = document.createElement("div");
-    div.className = "dl card";
+    div.className = `dl card ${kind}`;
     if (kind === "chead") {
       div.appendChild(span("border", "  ┌─ "));
       div.appendChild(span(`st-${record.comment.status}`, `${STATUS_GLYPH[record.comment.status] ?? "?"} `));
@@ -229,7 +234,7 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
       if (record.wasPath) div.appendChild(span("obadge", `(was ${record.wasPath}) `));
     } else if (kind === "cline") {
       div.appendChild(span("border", "  │ "));
-      div.appendChild(document.createTextNode(text ?? ""));
+      div.appendChild(span(role === "response" ? "celltext hang" : "celltext", text ?? ""));
     } else {
       div.appendChild(span("border", "  └─"));
     }
@@ -310,7 +315,7 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
         div = commentCardLine("chead", line.record);
         break;
       case "cline":
-        div = commentCardLine("cline", line.record, line.text);
+        div = commentCardLine("cline", line.record, line.text, line.role);
         break;
       case "cfoot":
         div = commentCardLine("cfoot", line.record);

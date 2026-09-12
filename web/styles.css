@@ -63,6 +63,21 @@ body {
    `.celltext` (or a split half's) wraps. */
 #app.wrap .dl { height: auto; min-height: 20px; align-items: flex-start; }
 #app.wrap .dl .celltext { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+/* Wrapped card body: the "  │ " chrome is one line box tall while the text
+   beside it may be many, and a glyph cannot repeat. Keep the character for
+   layout width and copy fidelity, but paint the rule with a border so it runs
+   the full height. 2.5ch is the centre of the third cell - where the glyph,
+   and the head/foot corners, sit. */
+#app.wrap .dl.card.cline .border { align-self: stretch; position: relative; color: transparent; }
+#app.wrap .dl.card.cline .border::before {
+  content: ""; position: absolute; left: 2.5ch; top: 0; bottom: 0;
+  border-left: 1px solid var(--card-border);
+}
+/* `↳ ` is two cells: wrapped response text lines up under the text, not the
+   arrow. Scoped to wrap - a negative indent would clip under overflow:hidden. */
+#app.wrap .dl.card .celltext.hang { padding-left: 2ch; text-indent: -2ch; }
+/* The header is a title bar: it truncates like the TUI and nvim, never grows. */
+#app.wrap .dl.card.chead { overflow: hidden; }
 #overlay .overlay-error { color: var(--reopened); margin-top: 6px; }
 #overlay .overlay-error[hidden] { display: none; }
 #viewport { flex: 1; overflow: auto; outline: none; position: relative; }
@@ -82,7 +97,7 @@ body {
 .dl.banner-row { background: var(--banner-bg); font-weight: 600; }
 .dl.notice { color: var(--warn); }
 .dl.card { background: var(--card-bg); }
-.dl.card .border { color: var(--card-border); }
+.dl.card .border { color: var(--card-border); flex-shrink: 0; }
 .dl .wa { background: var(--add-word-bg); } .dl .wd { background: var(--remove-word-bg); }
 .dl .hit { background: var(--search-bg); }
 .dl .st-open { color: var(--open); } .dl .st-addressed { color: var(--addressed); }

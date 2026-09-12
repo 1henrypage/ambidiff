@@ -182,6 +182,36 @@ describe("display model", () => {
     expect(display[9]).toEqual(expect.objectContaining({ kind: "cline", text: "snippet: gone()" }));
     expect(buildDisplay({ kind: "overview", comments: [] })[0]?.kind).toBe("notice");
   });
+
+  test("only_the_response_line_carries_the_response_role", () => {
+    const display = buildDisplay({
+      kind: "overview",
+      comments: [
+        { comment: { ...comment("c-r", null), path: null, response: "all done" }, anchor: null, wasPath: null, unattached: false },
+      ],
+    });
+    const clines = display.filter((d): d is Extract<typeof d, { kind: "cline" }> => d.kind === "cline");
+    expect(clines).toHaveLength(3); // "b1", "b2", the response
+    expect(clines.filter((c) => c.role === "response")).toHaveLength(1);
+    expect(clines.find((c) => c.role === "response")?.text).toBe("↳ all done");
+    expect(clines.filter((c) => c.role !== "response").every((c) => c.role === undefined)).toBe(true);
+  });
+
+  test("a_single_line_body_never_splits_regardless_of_length", () => {
+    // The layout engine, not paint.ts, owns wrapping (the drift firewall):
+    // however long a body line is, buildDisplay must still emit it as
+    // exactly one `cline`.
+    const longBody = "x".repeat(5000);
+    const display = buildDisplay({
+      kind: "overview",
+      comments: [
+        { comment: { ...comment("c-long", null), path: null, body: longBody }, anchor: null, wasPath: null, unattached: false },
+      ],
+    });
+    const clines = display.filter((d) => d.kind === "cline");
+    expect(clines).toHaveLength(1);
+    expect((clines[0] as { text: string }).text).toBe(longBody);
+  });
 });
 
 describe("HeightIndex", () => {

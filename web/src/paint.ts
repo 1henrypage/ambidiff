@@ -120,7 +120,7 @@ export type DisplayLine =
   | { kind: "blank" }
   | { kind: "row"; rowIndex: number }
   | { kind: "chead"; record: CommentRecord }
-  | { kind: "cline"; record: CommentRecord; text: string }
+  | { kind: "cline"; record: CommentRecord; text: string; role?: "response" }
   | { kind: "cfoot"; record: CommentRecord };
 
 export type Pane =
@@ -131,7 +131,7 @@ function card(out: DisplayLine[], record: CommentRecord): void {
   out.push({ kind: "chead", record });
   for (const line of record.comment.body.split("\n")) out.push({ kind: "cline", record, text: line });
   if (record.comment.response !== undefined) {
-    out.push({ kind: "cline", record, text: `↳ ${record.comment.response}` });
+    out.push({ kind: "cline", record, text: `↳ ${record.comment.response}`, role: "response" });
   }
   if (record.unattached && record.comment.snippet !== undefined) {
     out.push({ kind: "cline", record, text: `snippet: ${record.comment.snippet}` });

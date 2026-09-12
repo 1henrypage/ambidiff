@@ -25,6 +25,7 @@ use crate::application::{Application, ReviewCommand, Snapshot};
 use super::editor::Editor;
 use super::render;
 use super::theme::{self, Theme};
+use super::wrap;
 
 /// How long a transient status message stays on the status bar.
 pub const STATUS_TTL: Duration = Duration::from_secs(4);
@@ -124,6 +125,18 @@ pub enum DRow {
     Blank,
 }
 
+/// Hanging indent for wrapped response continuation lines (the `\u{21b3} `
+/// arrow prefix is two cells wide).
+const RESPONSE_INDENT: usize = 2;
+
+/// The comment-card wrap budget for one frame: `None` means wrap is off
+/// (unwrapped, one row per physical line - byte-identical to no wrap at
+/// all).
+#[derive(Debug, Clone, Copy)]
+struct CardLayout {
+    width: Option<usize>,
+}
+
 /// A pending editor overlay and what saving it will do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorIntent {
@@ -219,6 +232,10 @@ pub struct App {
     /// The last layout `render::draw` computed; mouse hit-testing reads
     /// this instead of recomputing geometry (B25).
     last_layout: Option<render::Layout>,
+    /// Set when `apply_layout` rebuilt wrapped rows for a new width this
+    /// frame, so the event loop repaints immediately instead of leaving
+    /// the stale chunking on screen until the next input event (A6).
+    reflow_dirty: bool,
     quit: bool,
 }
 
@@ -277,6 +294,7 @@ impl App {
             overlay: Overlay::None,
             status_msg: None,
             last_layout: None,
+            reflow_dirty: false,
             quit: false,
         };
         app.reproject();
@@ -416,16 +434,26 @@ impl App {
         self.quit = true;
     }
 
-    /// Store this frame's computed layout; when the wrap budget
-    /// (`content_width`) changed and wrap is on, rebuilds the wrapped rows
-    /// so they reflow to the new width (B25).
+    /// Store this frame's computed layout; when either wrap budget
+    /// (`content_width` for code rows, `card_width` for comment cards)
+    /// changed and wrap is on, rebuilds the wrapped rows so they reflow to
+    /// the new width (B25). The two budgets move independently when a
+    /// resize is absorbed entirely by the gutter, so both are compared.
     pub fn apply_layout(&mut self, layout: render::Layout) {
-        let changed =
-            self.last_layout.as_ref().map(|l| l.content_width) != Some(layout.content_width);
+        let budgets = |l: &render::Layout| (l.content_width, l.card_width);
+        let changed = self.last_layout.as_ref().map(budgets) != Some(budgets(&layout));
         self.last_layout = Some(layout);
         if changed && self.wrap {
             self.rebuild_display_preserving_cursor();
+            self.reflow_dirty = true;
         }
+    }
+
+    /// Drain the reflow-dirty flag `apply_layout` set; true means the
+    /// event loop must repaint this frame's newly reflowed rows now
+    /// rather than waiting for the next input event (A6).
+    pub fn take_reflow_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.reflow_dirty)
     }
 
     pub fn set_scroll(&mut self, scroll: usize) {
@@ -818,24 +846,61 @@ impl App {
         self.refresh_search_matches();
     }
 
-    fn push_comment_card(display: &mut Vec<DRow>, comment: &Comment, pane_idx: usize) {
+    /// Build one comment card's display rows: head, wrapped body, wrapped
+    /// response with a hanging `\u{21b3} ` indent, an optional trailer
+    /// (the overview's unattached `snippet: ...` line, INSIDE the card so
+    /// it never leaves an unbordered orphan row behind a closed card), and
+    /// the closing border. A pure associated fn so it is unit-testable
+    /// against a hand-built `Comment` with no store, no tempdir, no
+    /// terminal.
+    fn push_comment_card(
+        display: &mut Vec<DRow>,
+        comment: &Comment,
+        pane_idx: usize,
+        cards: CardLayout,
+        trailer: Option<&str>,
+    ) {
         display.push(DRow::CommentHead { comment: pane_idx });
-        for line in comment.body.lines() {
+        for line in wrap::card_lines(&comment.body, cards.width) {
             display.push(DRow::CommentLine {
                 comment: pane_idx,
-                text: line.to_string(),
+                text: line,
             });
         }
         if let Some(response) = &comment.response {
-            display.push(DRow::CommentLine {
-                comment: pane_idx,
-                text: format!("\u{21b3} {response}"),
-            });
+            match cards.width {
+                None => display.push(DRow::CommentLine {
+                    comment: pane_idx,
+                    text: format!("\u{21b3} {response}"),
+                }),
+                Some(width) => {
+                    let resp_width = width.saturating_sub(RESPONSE_INDENT).max(1);
+                    for (i, piece) in wrap::card_lines(response, Some(resp_width))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let prefix = if i == 0 { "\u{21b3} " } else { "  " };
+                        display.push(DRow::CommentLine {
+                            comment: pane_idx,
+                            text: format!("{prefix}{piece}"),
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(trailer) = trailer {
+            for line in wrap::card_lines(trailer, cards.width) {
+                display.push(DRow::CommentLine {
+                    comment: pane_idx,
+                    text: line,
+                });
+            }
         }
         display.push(DRow::CommentFoot { comment: pane_idx });
     }
 
     fn build_overview_display(&mut self, display: &mut Vec<DRow>) {
+        let cards = self.card_layout();
         let review_level: Vec<usize> = self
             .projected
             .overview
@@ -869,7 +934,13 @@ impl App {
                 },
                 was_path: None,
             });
-            Self::push_comment_card(display, &self.snapshot.review.comments[idx], pane_idx);
+            Self::push_comment_card(
+                display,
+                &self.snapshot.review.comments[idx],
+                pane_idx,
+                cards,
+                None,
+            );
         }
 
         if !unattached.is_empty() {
@@ -891,13 +962,8 @@ impl App {
                     was_path: None,
                 });
                 let comment = &self.snapshot.review.comments[idx];
-                Self::push_comment_card(display, comment, pane_idx);
-                if let Some(snippet) = &comment.snippet {
-                    display.push(DRow::CommentLine {
-                        comment: pane_idx,
-                        text: format!("snippet: {snippet}"),
-                    });
-                }
+                let trailer = comment.snippet.as_deref().map(|s| format!("snippet: {s}"));
+                Self::push_comment_card(display, comment, pane_idx, cards, trailer.as_deref());
             }
         }
     }
@@ -933,31 +999,30 @@ impl App {
             })
             .collect();
 
+        let cards = self.card_layout();
         // File-level comments (no row) come right under the banner.
         for (pane_idx, pane) in self.pane.iter().enumerate() {
             if pane.anchor.row.is_none() {
                 let comment = &self.snapshot.review.comments[pane.index];
-                Self::push_comment_card(display, comment, pane_idx);
+                Self::push_comment_card(display, comment, pane_idx, cards, None);
             }
         }
 
         let width = self.effective_text_width();
         for (row_idx, row) in view.view().rows.iter().enumerate() {
             match row {
-                Row::Unified { cell, .. } if self.wrap && cell.text.len() > width => {
-                    let mut start = 0;
-                    let mut first = true;
-                    while start < cell.text.len() {
-                        let end =
-                            floor_char_boundary(&cell.text, (start + width).min(cell.text.len()));
-                        let end = if end <= start { cell.text.len() } else { end };
+                Row::Unified { cell, .. }
+                    if self.wrap && wrap::display_width_expanded(&cell.text) > width =>
+                {
+                    for (i, (start, end)) in wrap::chunk_ranges(&cell.text, width)
+                        .into_iter()
+                        .enumerate()
+                    {
                         display.push(DRow::View {
                             idx: row_idx,
                             seg: Some((start, end)),
-                            continuation: !first,
+                            continuation: i > 0,
                         });
-                        first = false;
-                        start = end;
                     }
                 }
                 _ => display.push(DRow::View {
@@ -969,7 +1034,7 @@ impl App {
             for (pane_idx, pane) in self.pane.iter().enumerate() {
                 if pane.anchor.row == Some(row_idx) {
                     let comment = &self.snapshot.review.comments[pane.index];
-                    Self::push_comment_card(display, comment, pane_idx);
+                    Self::push_comment_card(display, comment, pane_idx, cards, None);
                 }
             }
         }
@@ -981,6 +1046,24 @@ impl App {
             .map(|l| l.content_width)
             .unwrap_or(120)
             .max(20)
+    }
+
+    /// Mirrors `effective_text_width` for the card wrap budget: the last
+    /// computed `card_width`, or a sane fallback before the first layout.
+    fn effective_card_width(&self) -> usize {
+        self.last_layout
+            .as_ref()
+            .map(|l| l.card_width)
+            .unwrap_or(116)
+            .max(wrap::MIN_CARD_WIDTH)
+    }
+
+    /// The current card wrap budget: `None` when wrap is off (unwrapped,
+    /// one row per physical line).
+    fn card_layout(&self) -> CardLayout {
+        CardLayout {
+            width: self.wrap.then(|| self.effective_card_width()),
+        }
     }
 
     // ------ navigation ------
@@ -1432,16 +1515,6 @@ impl App {
     }
 }
 
-fn floor_char_boundary(s: &str, mut i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1498,6 +1571,257 @@ mod tests {
         assert_eq!(
             resolve_target(&FileTarget::Overview, &files),
             TargetResolution::Overview
+        );
+    }
+
+    // ---------------------------------------------------- push_comment_card
+
+    use ambidiff_core::review::Status;
+
+    fn test_comment(body: &str, response: Option<&str>) -> Comment {
+        Comment {
+            id: "c-test".to_string(),
+            rev: 1,
+            status: Status::Open,
+            path: None,
+            side: None,
+            line: None,
+            end_line: None,
+            snippet: None,
+            body: body.to_string(),
+            response: response.map(str::to_string),
+            author: "a".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            extra: Default::default(),
+        }
+    }
+
+    fn row_pane_idx(row: &DRow) -> Option<usize> {
+        match row {
+            DRow::CommentHead { comment }
+            | DRow::CommentLine { comment, .. }
+            | DRow::CommentFoot { comment } => Some(*comment),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn push_comment_card_unwrapped_shape_is_locked() {
+        let comment = test_comment("line one\nline two", Some("all done"));
+        let mut display = Vec::new();
+        App::push_comment_card(&mut display, &comment, 3, CardLayout { width: None }, None);
+
+        assert!(matches!(display[0], DRow::CommentHead { .. }));
+        assert!(matches!(display[1], DRow::CommentLine { .. }));
+        assert!(matches!(display[2], DRow::CommentLine { .. }));
+        match &display[3] {
+            DRow::CommentLine { text, .. } => assert_eq!(text, "\u{21b3} all done"),
+            other => panic!("expected the response line, got {other:?}"),
+        }
+        assert!(matches!(display[4], DRow::CommentFoot { .. }));
+        assert_eq!(display.len(), 5);
+        for row in &display {
+            assert_eq!(row_pane_idx(row), Some(3));
+        }
+    }
+
+    #[test]
+    fn push_comment_card_wrapped_body_sits_between_head_and_foot() {
+        let long_body = "one two three four five six seven eight nine ten";
+        let comment = test_comment(long_body, None);
+        let mut display = Vec::new();
+        App::push_comment_card(
+            &mut display,
+            &comment,
+            0,
+            CardLayout { width: Some(12) },
+            None,
+        );
+
+        assert!(matches!(display.first(), Some(DRow::CommentHead { .. })));
+        assert!(matches!(display.last(), Some(DRow::CommentFoot { .. })));
+        assert!(
+            display.len() > 3,
+            "a long body at a narrow width must wrap into several rows"
+        );
+        for row in &display[1..display.len() - 1] {
+            match row {
+                DRow::CommentLine { text, .. } => assert!(wrap::display_width(text) <= 12),
+                other => panic!("expected a body CommentLine, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn push_comment_card_wrapped_response_has_hanging_indent() {
+        let response = "alpha beta gamma delta epsilon zeta eta";
+        let comment = test_comment("body", Some(response));
+        let mut display = Vec::new();
+        App::push_comment_card(
+            &mut display,
+            &comment,
+            0,
+            CardLayout { width: Some(12) },
+            None,
+        );
+
+        // display[0] = head, display[1] = the (short, unwrapped) body,
+        // display[2..len-1] = wrapped response rows, display[len-1] = foot.
+        let response_lines: Vec<String> = display[2..display.len() - 1]
+            .iter()
+            .map(|r| match r {
+                DRow::CommentLine { text, .. } => text.clone(),
+                other => panic!("expected a response CommentLine, got {other:?}"),
+            })
+            .collect();
+        assert!(
+            response_lines.len() > 1,
+            "expected the response to wrap into several rows"
+        );
+        assert!(response_lines[0].starts_with("\u{21b3} "));
+        for line in &response_lines[1..] {
+            assert!(line.starts_with("  "));
+            assert!(!line.starts_with('\u{21b3}'));
+        }
+        for line in &response_lines {
+            assert!(wrap::display_width(line) <= 12);
+        }
+    }
+
+    #[test]
+    fn push_comment_card_trailer_sits_above_the_foot() {
+        let comment = test_comment("body", None);
+        let mut display = Vec::new();
+        App::push_comment_card(
+            &mut display,
+            &comment,
+            0,
+            CardLayout { width: None },
+            Some("snippet: const x = 1;"),
+        );
+        let n = display.len();
+        match &display[n - 2] {
+            DRow::CommentLine { text, .. } => assert_eq!(text, "snippet: const x = 1;"),
+            other => panic!("expected the trailer directly above the foot, got {other:?}"),
+        }
+        assert!(matches!(display[n - 1], DRow::CommentFoot { .. }));
+    }
+
+    // -------------------------------------------------------- toggle_wrap
+
+    fn open_test_app_with_review_comment(body: &str) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path());
+        let review = ambidiff_core::review::ReviewFile::new(
+            "r".into(),
+            ambidiff_core::review::Source::git(None),
+            "t",
+        );
+        store.init(&review).expect("init");
+        let mut app = App::open(store, false, false).expect("open");
+        app.app
+            .execute(ReviewCommand::Add(CommentAddRequest {
+                path: None,
+                side: None,
+                line: None,
+                end_line: None,
+                body: body.to_string(),
+                author: None,
+            }))
+            .expect("add comment");
+        app.refresh(RefreshKind::Review);
+        (dir, app)
+    }
+
+    fn layout_inputs() -> render::LayoutInputs {
+        render::LayoutInputs {
+            show_tree: false,
+            line_numbers: true,
+            mode: ViewMode::Unified,
+            tree_cursor: 0,
+            max_line_number: 1,
+        }
+    }
+
+    fn comment_line_count(app: &App) -> usize {
+        app.display()
+            .iter()
+            .filter(|r| matches!(r, DRow::CommentLine { .. }))
+            .count()
+    }
+
+    #[test]
+    fn toggle_wrap_grows_a_long_card_and_preserves_the_cursor() {
+        let long_body = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu \
+            xi omicron pi rho sigma tau";
+        let (_dir, mut app) = open_test_app_with_review_comment(long_body);
+        app.apply_layout(render::layout(
+            &layout_inputs(),
+            ratatui::layout::Rect::new(0, 0, 40, 24),
+        ));
+
+        assert_eq!(
+            comment_line_count(&app),
+            1,
+            "a one-line body is a single CommentLine when wrap is off"
+        );
+
+        let head_pos = app
+            .display()
+            .iter()
+            .position(|r| matches!(r, DRow::CommentHead { .. }))
+            .expect("comment head in the overview");
+        app.cursor_to(head_pos);
+        let before = app.comment_at_cursor();
+        assert!(before.is_some());
+
+        app.toggle_wrap();
+
+        assert!(
+            comment_line_count(&app) > 1,
+            "wrap must grow the long card into several lines"
+        );
+        assert_eq!(
+            app.comment_at_cursor(),
+            before,
+            "the cursor must stay on the same comment across the toggle"
+        );
+    }
+
+    #[test]
+    fn narrower_layout_reflows_wrapped_cards_only_while_wrap_is_on() {
+        let long_body = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu \
+            xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        let (_dir, mut app) = open_test_app_with_review_comment(long_body);
+        app.apply_layout(render::layout(
+            &layout_inputs(),
+            ratatui::layout::Rect::new(0, 0, 100, 24),
+        ));
+        app.toggle_wrap();
+        let wide_lines = comment_line_count(&app);
+
+        app.apply_layout(render::layout(
+            &layout_inputs(),
+            ratatui::layout::Rect::new(0, 0, 40, 24),
+        ));
+        let narrow_lines = comment_line_count(&app);
+        assert!(
+            narrow_lines > wide_lines,
+            "a narrower card width must reflow into more lines while wrap is on"
+        );
+
+        // Negative: with wrap off, a width change must not rebuild rows.
+        app.toggle_wrap();
+        let off_lines = comment_line_count(&app);
+        app.apply_layout(render::layout(
+            &layout_inputs(),
+            ratatui::layout::Rect::new(0, 0, 100, 24),
+        ));
+        assert_eq!(
+            comment_line_count(&app),
+            off_lines,
+            "wrap off must not reflow on a width change"
         );
     }
 }
