@@ -11,6 +11,7 @@ import {
   type FileFilter,
   type FileView,
   type GapInfo,
+  type LineTarget,
   type ProjectionSnapshot,
   type SearchMatch,
   type ThemeWire,
@@ -21,6 +22,7 @@ import {
   decodeExpansionResult,
   decodeFileView,
   decodeGap,
+  decodeLineTarget,
   decodeProjectionSnapshot,
   decodeSearchMatch,
 } from "./protocol";
@@ -45,6 +47,7 @@ export interface WasmExports {
   ad_pending_expansions(path: string): string;
   ad_expand(path: string, gapId: string, content: string): string;
   ad_search(path: string, query: string): string;
+  ad_goto_line(path: string, line: number): string;
   ad_anchor_target(path: string, row: number, cell: string): string;
   ad_commands(): string;
 }
@@ -99,6 +102,7 @@ export interface Core {
   pendingExpansions(path: string): GapInfo[];
   expand(path: string, gapId: string, content: string): ExpandInstall;
   search(path: string, query: string): SearchMatch[];
+  gotoLine(path: string, line: number): LineTarget;
   anchorTarget(path: string, row: number, cell: "auto" | "left" | "right"): AnchorTarget | null;
   commands(): CommandSpec[];
 }
@@ -193,6 +197,10 @@ export function createCore(wasm: WasmExports): Core {
     search(path, query) {
       const raw = parseJson(wasm.ad_search(path, query), "search");
       return Array.isArray(raw) ? raw.map((m) => decodeSearchMatch(m)) : [];
+    },
+    gotoLine(path, line) {
+      const raw = parseJson(wasm.ad_goto_line(path, line), "gotoLine");
+      return decodeLineTarget(raw);
     },
     anchorTarget(path, row, cell) {
       const raw = parseJson(wasm.ad_anchor_target(path, row, cell), "anchorTarget");

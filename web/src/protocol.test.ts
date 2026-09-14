@@ -18,6 +18,7 @@ import {
   decodeFileCounts,
   decodeFileView,
   decodeLifecycle,
+  decodeLineTarget,
   decodeRow,
   decodeCommandTable,
   decodeExpansionResult,
@@ -239,5 +240,21 @@ describe("server messages", () => {
     const raw = [{ id: "ambidiff.nav.cursorDown", name: "Cursor down", desc: "d", tui: ["j"], nvim: ["j"], web: ["j"] }];
     expect(decodeCommandTable(raw)).toEqual(raw);
     expect(() => decodeCommandTable({})).toThrow(DecodeError);
+  });
+
+  test("decodes_line_target", () => {
+    expect(decodeLineTarget({ kind: "exact", row: 3, side: "new" })).toEqual({
+      kind: "exact",
+      row: 3,
+      side: "new",
+    });
+    expect(decodeLineTarget({ kind: "inGap", row: 0, gapId: "before:0" })).toEqual({
+      kind: "inGap",
+      row: 0,
+      gapId: "before:0",
+    });
+    expect(decodeLineTarget({ kind: "nearest", row: null })).toEqual({ kind: "nearest", row: null });
+    expect(decodeLineTarget({ kind: "nearest", row: 5 })).toEqual({ kind: "nearest", row: 5 });
+    expect(() => decodeLineTarget({ kind: "bogus" })).toThrow(DecodeError);
   });
 });

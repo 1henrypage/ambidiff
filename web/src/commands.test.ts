@@ -36,3 +36,57 @@ describe("commands", () => {
     },
   );
 });
+
+describe("counted dispatch", () => {
+  function spyStore() {
+    const calls = {
+      moveCursor: [] as number[],
+      gotoLine: [] as number[],
+      cursorToBottom: 0,
+      cursorToTop: 0,
+    };
+    const store = {
+      focus: "diff",
+      moveCursor: (n: number) => calls.moveCursor.push(n),
+      treeStep: (n: number) => calls.moveCursor.push(n),
+      gotoLine: (n: number) => calls.gotoLine.push(n),
+      cursorToBottom: () => {
+        calls.cursorToBottom++;
+      },
+      cursorToTop: () => {
+        calls.cursorToTop++;
+      },
+    } as unknown as Store;
+    return { store, calls };
+  }
+
+  test("a_count_multiplies_cursor_down", () => {
+    const { store, calls } = spyStore();
+    const dispatcher = createDispatcher(store, {} as unknown as Editor, () => {});
+    dispatcher.run("ambidiff.nav.cursorDown", 10);
+    expect(calls.moveCursor).toEqual([10]);
+  });
+
+  test("no_count_defaults_to_one", () => {
+    const { store, calls } = spyStore();
+    const dispatcher = createDispatcher(store, {} as unknown as Editor, () => {});
+    dispatcher.run("ambidiff.nav.cursorUp");
+    expect(calls.moveCursor).toEqual([-1]);
+  });
+
+  test("bottom_with_a_count_goes_to_that_line_instead_of_the_end", () => {
+    const { store, calls } = spyStore();
+    const dispatcher = createDispatcher(store, {} as unknown as Editor, () => {});
+    dispatcher.run("ambidiff.nav.bottom", 42);
+    expect(calls.gotoLine).toEqual([42]);
+    expect(calls.cursorToBottom).toBe(0);
+  });
+
+  test("bottom_without_a_count_goes_to_the_end", () => {
+    const { store, calls } = spyStore();
+    const dispatcher = createDispatcher(store, {} as unknown as Editor, () => {});
+    dispatcher.run("ambidiff.nav.bottom");
+    expect(calls.cursorToBottom).toBe(1);
+    expect(calls.gotoLine).toEqual([]);
+  });
+});

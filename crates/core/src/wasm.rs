@@ -307,6 +307,18 @@ pub fn ad_search(path: &str, query: &str) -> String {
     })
 }
 
+/// Resolve a line number against a cached file's rows (the `:<num>` motion).
+#[wasm_bindgen]
+pub fn ad_goto_line(path: &str, line: u32) -> String {
+    STATE.with(|s| {
+        let s = s.borrow();
+        match s.views.get(path) {
+            Some(state) => ok_json(&crate::goto::find_line(&state.view().rows, line)),
+            None => err_json(format!("{path:?} not loaded")),
+        }
+    })
+}
+
 /// Expand a gap in a cached view. Splices the resulting rows into the
 /// cached view (so anchors and search see the expanded state) and returns
 /// them alongside the now-current view and comments; no reload can silently
@@ -608,5 +620,20 @@ mod wasm_tests {
         let split = v(ad_file_projection("src/a.rs"));
         assert_eq!(split["view"]["mode"], "split");
         assert_eq!(split["view"]["rows"][1]["type"], "split");
+    }
+
+    #[wasm_bindgen_test]
+    fn goto_line_resolves_against_the_cached_view() {
+        seed();
+        v(ad_load_file("src/a.rs", RAW, OPTS));
+        // RAW is "@@ -1,2 +1,3 @@\n a\n+B\n c\n": row 2 is the added "B" line.
+        assert_eq!(
+            v(ad_goto_line("src/a.rs", 2)),
+            serde_json::json!({"kind": "exact", "row": 2, "side": "new"})
+        );
+        assert_eq!(
+            ad_goto_line("nope.rs", 1),
+            err_json("\"nope.rs\" not loaded")
+        );
     }
 }

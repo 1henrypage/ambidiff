@@ -12,7 +12,7 @@ export function chordOf(e: KeyboardEvent): string {
 }
 
 export interface Dispatcher {
-  run(id: string): void;
+  run(id: string, count?: number | null): void;
   handledIds(): Set<string>;
 }
 
@@ -20,27 +20,51 @@ function reportWrite(store: Store, promise: Promise<unknown>): void {
   promise.catch((e: unknown) => store.setFlash(e instanceof Error ? e.message : String(e)));
 }
 
+/** Repeat a cursor motion `n` times, stopping early once it stops moving
+ * the cursor (so a large count at the end of the file does not spam a
+ * "no more" flash). */
+function repeatMotion(store: Store, n: number, step: () => void): void {
+  for (let i = 0; i < n; i++) {
+    const before = store.cursor;
+    step();
+    if (store.cursor === before) break;
+  }
+}
+
 export function createDispatcher(store: Store, editor: Editor, render: () => void): Dispatcher {
-  const handlers = new Map<string, () => void>([
+  const handlers = new Map<string, (count: number | null) => void>([
     [
       "ambidiff.nav.cursorDown",
-      () => (store.focus === "tree" ? store.treeStep(1) : store.moveCursor(1)),
+      (n) => (store.focus === "tree" ? store.treeStep(n ?? 1) : store.moveCursor(n ?? 1)),
     ],
     [
       "ambidiff.nav.cursorUp",
-      () => (store.focus === "tree" ? store.treeStep(-1) : store.moveCursor(-1)),
+      (n) => (store.focus === "tree" ? store.treeStep(-(n ?? 1)) : store.moveCursor(-(n ?? 1))),
     ],
-    ["ambidiff.nav.pageDown", () => store.moveCursor(20)],
-    ["ambidiff.nav.pageUp", () => store.moveCursor(-20)],
+    ["ambidiff.nav.pageDown", (n) => store.moveCursor(20 * (n ?? 1))],
+    ["ambidiff.nav.pageUp", (n) => store.moveCursor(-20 * (n ?? 1))],
     ["ambidiff.nav.top", () => store.cursorToTop()],
-    ["ambidiff.nav.bottom", () => store.cursorToBottom()],
-    ["ambidiff.nav.nextHunk", () => store.jumpTo((d) => store.isHunkLine(d), true)],
-    ["ambidiff.nav.prevHunk", () => store.jumpTo((d) => store.isHunkLine(d), false)],
-    ["ambidiff.nav.nextFile", () => store.stepFile(1)],
-    ["ambidiff.nav.prevFile", () => store.stepFile(-1)],
-    ["ambidiff.nav.nextComment", () => store.jumpTo((d) => d.kind === "chead", true)],
-    ["ambidiff.nav.prevComment", () => store.jumpTo((d) => d.kind === "chead", false)],
+    ["ambidiff.nav.bottom", (n) => (n !== null ? store.gotoLine(n) : store.cursorToBottom())],
+    [
+      "ambidiff.nav.nextHunk",
+      (n) => repeatMotion(store, n ?? 1, () => store.jumpTo((d) => store.isHunkLine(d), true)),
+    ],
+    [
+      "ambidiff.nav.prevHunk",
+      (n) => repeatMotion(store, n ?? 1, () => store.jumpTo((d) => store.isHunkLine(d), false)),
+    ],
+    ["ambidiff.nav.nextFile", (n) => store.stepFile(n ?? 1)],
+    ["ambidiff.nav.prevFile", (n) => store.stepFile(-(n ?? 1))],
+    [
+      "ambidiff.nav.nextComment",
+      (n) => repeatMotion(store, n ?? 1, () => store.jumpTo((d) => d.kind === "chead", true)),
+    ],
+    [
+      "ambidiff.nav.prevComment",
+      (n) => repeatMotion(store, n ?? 1, () => store.jumpTo((d) => d.kind === "chead", false)),
+    ],
     ["ambidiff.nav.focusSwitch", () => store.setFocus(store.focus === "tree" ? "diff" : "tree")],
+    ["ambidiff.nav.gotoLine", () => editor.lineInput((line) => store.gotoLine(line))],
 
     ["ambidiff.view.toggleLayout", () => store.toggleMode()],
     ["ambidiff.view.toggleWordDiff", () => store.toggleWordDiff()],
@@ -194,10 +218,10 @@ export function createDispatcher(store: Store, editor: Editor, render: () => voi
     ["ambidiff.app.help", () => editor.help(store.commands)],
   ]);
 
-  function run(id: string): void {
+  function run(id: string, count: number | null = null): void {
     const handler = handlers.get(id);
     if (handler) {
-      handler();
+      handler(count);
       render();
     }
   }

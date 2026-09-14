@@ -81,10 +81,31 @@ async function main(): Promise<void> {
     const tag = (e.target as HTMLElement | null)?.tagName;
     if (tag === "TEXTAREA" || tag === "INPUT") return;
     const chord = chordOf(e);
+
+    // A digit starts or extends a count prefix; a leading 0 is not a count.
+    // The modifier guard keeps e.g. Ctrl+1 (browser tab switching) out of
+    // the count buffer.
+    if (
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      /^[0-9]$/.test(chord) &&
+      !(chord === "0" && store.pendingCount === null)
+    ) {
+      e.preventDefault();
+      store.pushCountDigit(Number(chord));
+      return;
+    }
+    if (e.key === "Escape") {
+      store.clearCount();
+      return;
+    }
     const command = store.commands.find((c) => c.web.includes(chord));
     if (command && dispatcher.handledIds().has(command.id)) {
       e.preventDefault();
-      dispatcher.run(command.id);
+      dispatcher.run(command.id, store.takeCount());
+    } else {
+      store.clearCount();
     }
   });
 

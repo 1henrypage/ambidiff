@@ -62,6 +62,9 @@ function nextFilter(f: FileFilter): FileFilter {
   return f === "all" ? "annotated" : f === "annotated" ? "unreviewed" : "all";
 }
 
+/** Ceiling for a vim-style count prefix, mirroring the TUI's `MAX_COUNT`. */
+const MAX_COUNT = 1_000_000;
+
 function overviewPane(snapshot: ProjectionSnapshot | null): Pane {
   const comments: CommentRecord[] = (snapshot?.overview ?? []).map((o) => ({
     comment: o.comment,
@@ -102,6 +105,8 @@ export class Store {
   };
   commands: import("./protocol").CommandSpec[] = [];
   flash: string | null = null;
+  /** Pending vim-style count prefix (the "10" while typing `10j`). */
+  pendingCount: number | null = null;
 
   connectionState: import("./transport").ConnectionState = "disconnected";
 
@@ -467,6 +472,26 @@ export class Store {
     this.emit();
   }
 
+  // -------------------------------------------------------- count prefix
+
+  pushCountDigit(d: number): void {
+    const next = (this.pendingCount ?? 0) * 10 + d;
+    this.pendingCount = Math.min(next, MAX_COUNT);
+    this.emit();
+  }
+
+  /** Read and clear the pending count. */
+  takeCount(): number | null {
+    const n = this.pendingCount;
+    this.pendingCount = null;
+    return n;
+  }
+
+  clearCount(): void {
+    this.pendingCount = null;
+    this.emit();
+  }
+
   // ------------------------------------------------------------- cursor
 
   moveCursor(delta: number): void {
@@ -621,13 +646,46 @@ export class Store {
     this.gotoMatch(this.search.current);
   }
 
-  private gotoMatch(i: number): void {
-    const m = this.search.matches[i];
-    if (!m) return;
-    const idx = this.display.findIndex((d) => d.kind === "row" && d.rowIndex === m.row);
+  /** Move the cursor to the display row painting view row `rowIndex`. */
+  private cursorToViewRow(rowIndex: number): boolean {
+    const idx = this.display.findIndex((d) => d.kind === "row" && d.rowIndex === rowIndex);
     if (idx >= 0) {
       this.cursor = idx;
       this.emit();
+      return true;
+    }
+    return false;
+  }
+
+  private gotoMatch(i: number): void {
+    const m = this.search.matches[i];
+    if (!m) return;
+    this.cursorToViewRow(m.row);
+  }
+
+  /** The `:<num>` motion: resolve `line` against the current file's rows
+   * and move the cursor there. */
+  gotoLine(line: number): void {
+    if (this.nav.kind !== "file") {
+      this.flash = "open a file first";
+      this.emit();
+      return;
+    }
+    const target = this.core.gotoLine(this.nav.path, line);
+    switch (target.kind) {
+      case "exact":
+        this.cursorToViewRow(target.row);
+        break;
+      case "inGap":
+        this.cursorToViewRow(target.row);
+        this.flash = `line ${line} is inside a collapsed gap; Enter expands`;
+        this.emit();
+        break;
+      case "nearest":
+        if (target.row !== null) this.cursorToViewRow(target.row);
+        this.flash = `line ${line} is not in this diff`;
+        this.emit();
+        break;
     }
   }
 

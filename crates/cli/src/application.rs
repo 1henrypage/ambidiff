@@ -688,6 +688,7 @@ pub const CAPABILITIES: &[Capability] = &[
     cap!("ambidiff.nav.nextComment", client),
     cap!("ambidiff.nav.prevComment", client),
     cap!("ambidiff.nav.focusSwitch", client),
+    cap!("ambidiff.nav.gotoLine", client),
     cap!("ambidiff.view.toggleLayout", client),
     cap!("ambidiff.view.toggleWordDiff", client),
     cap!("ambidiff.view.toggleTree", client),

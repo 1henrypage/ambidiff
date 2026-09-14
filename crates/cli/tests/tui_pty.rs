@@ -43,6 +43,19 @@ fn scratch_repo() -> (tempfile::TempDir, PathBuf) {
     (dir, root)
 }
 
+/// A repo whose file is long enough for a 10+ row cursor jump: every line is
+/// completely rewritten (no line is byte-identical on both sides), so git's
+/// diff shows one hunk with no gaps: a block of 15 old-side removes followed
+/// by a block of 15 new-side adds, in order -- a fully predictable row
+/// layout for the count-prefix and goto-line journey.
+fn tall_scratch_repo() -> (tempfile::TempDir, PathBuf) {
+    let original: String = (1..=15).map(|i| format!("const l{i} = {i};\n")).collect();
+    let modified: String = (1..=15).map(|i| format!("const m{i} = {i}00;\n")).collect();
+    let (dir, root) = repo_with(&[("src/app.ts", &original)]);
+    write(&root, "src/app.ts", &modified);
+    (dir, root)
+}
+
 fn spawn_tui(root: &Path) -> Session {
     spawn_tui_with(root, &[])
 }
@@ -343,6 +356,39 @@ fn watch_reload_preserves_cursor_line() {
     // Same logical line under the cursor after the reload.
     send(&mut session, "c");
     wait_for(&mut session, "comment on src/app.ts:2", "cursor preserved");
+    send(&mut session, "\x1b");
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+/// Vim-style count prefixes (`10j`) and the `:<num>` goto-line motion,
+/// TUI-only. Observable: the comment editor's title names the cursor line,
+/// exactly as `watch_reload_preserves_cursor_line` does.
+///
+/// Rows in `tall_scratch_repo`'s single hunk: banner(0), hunk header(1),
+/// 15 removes old1..old15 (rows 2..=16), 15 adds new1..new15 (rows 17..=31).
+#[test]
+fn count_prefix_and_goto_line_navigate() {
+    let (_dir, root) = tall_scratch_repo();
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "src/app.ts", "initial render");
+
+    // "10j" from the banner (row 0) lands on row 10: remove #9 (old side).
+    send(&mut session, "10j");
+    send(&mut session, "c");
+    wait_for(
+        &mut session,
+        "comment on src/app.ts:9",
+        "count-prefixed cursorDown",
+    );
+    send(&mut session, "\x1b"); // esc closes the editor
+
+    // `:7` addresses new-side line 7 directly (an add row).
+    send(&mut session, ":");
+    send(&mut session, "7");
+    send(&mut session, "\r");
+    send(&mut session, "c");
+    wait_for(&mut session, "comment on src/app.ts:7", "goto-line");
     send(&mut session, "\x1b");
     send(&mut session, "q");
     wait_for_exit(&mut session);

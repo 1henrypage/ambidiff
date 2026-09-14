@@ -217,20 +217,59 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
     } else if key.code == KeyCode::Esc {
+        app.clear_count();
+        return;
+    }
+
+    // Goto-line (`:`) typing mode.
+    if app.goto_input().is_some() {
+        match key.code {
+            KeyCode::Esc => app.cancel_goto(),
+            KeyCode::Enter => app.submit_goto(),
+            KeyCode::Backspace => {
+                let emptied = app
+                    .goto_input_mut()
+                    .map(|s| {
+                        s.pop();
+                        s.is_empty()
+                    })
+                    .unwrap_or(false);
+                if emptied {
+                    app.cancel_goto();
+                }
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if let Some(s) = app.goto_input_mut() {
+                    s.push(c);
+                }
+            }
+            _ => {}
+        }
         return;
     }
 
     let Some(chord) = chord_of(&key) else { return };
 
+    // A digit starts or extends a count prefix; a leading 0 is not a count.
+    if chord.len() == 1
+        && let Some(d) = chord.chars().next().and_then(|c| c.to_digit(10))
+        && !(d == 0 && app.pending_count().is_none())
+    {
+        app.push_count_digit(d);
+        return;
+    }
+    let count = app.take_count();
+
     // Tree focus gets its own basic motion first.
     if app.focus() == Focus::Tree {
+        let n = count.unwrap_or(1) as i64;
         match chord.as_str() {
             "j" | "Down" => {
-                app.tree_move(1);
+                app.tree_move(n);
                 return;
             }
             "k" | "Up" => {
-                app.tree_move(-1);
+                app.tree_move(-n);
                 return;
             }
             "Enter" | "l" => {
@@ -252,7 +291,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     let Some(command) = command_for_chord(&chord) else {
         return;
     };
-    run_command(app, command);
+    run_command(app, command, count);
 }
 
 /// Mutate the active editor's text buffer, if the overlay is an editor.
@@ -262,30 +301,59 @@ fn editor_mut(app: &mut App, f: impl FnOnce(&mut editor::Editor)) {
     }
 }
 
-fn run_command(app: &mut App, command: &str) {
+/// Repeat a cursor motion `n` times, stopping early once it stops moving the
+/// cursor (so a large count at the end of the file does not spam "no more").
+fn repeat_motion(app: &mut App, n: i64, mut f: impl FnMut(&mut App)) {
+    for _ in 0..n {
+        let before = app.cursor();
+        f(app);
+        if app.cursor() == before {
+            break;
+        }
+    }
+}
+
+/// Repeat a file-switching motion `n` times, stopping early once the target
+/// file stops changing (file motions move panes, not the cursor).
+fn repeat_file_motion(app: &mut App, n: i64, mut f: impl FnMut(&mut App)) {
+    for _ in 0..n {
+        let before = app.target().clone();
+        f(app);
+        if *app.target() == before {
+            break;
+        }
+    }
+}
+
+fn run_command(app: &mut App, command: &str, count: Option<u32>) {
+    let n = count.unwrap_or(1) as i64;
     match command {
-        "ambidiff.nav.cursorDown" => app.move_cursor(1),
-        "ambidiff.nav.cursorUp" => app.move_cursor(-1),
-        "ambidiff.nav.pageDown" => app.move_cursor(20),
-        "ambidiff.nav.pageUp" => app.move_cursor(-20),
+        "ambidiff.nav.cursorDown" => app.move_cursor(n),
+        "ambidiff.nav.cursorUp" => app.move_cursor(-n),
+        "ambidiff.nav.pageDown" => app.move_cursor(20 * n),
+        "ambidiff.nav.pageUp" => app.move_cursor(-20 * n),
         "ambidiff.nav.top" => app.cursor_to(0),
-        "ambidiff.nav.bottom" => app.cursor_to(usize::MAX),
-        "ambidiff.nav.nextHunk" => app.jump_hunk(true),
-        "ambidiff.nav.prevHunk" => app.jump_hunk(false),
-        "ambidiff.nav.nextFile" => app.next_file(true),
-        "ambidiff.nav.prevFile" => app.next_file(false),
-        "ambidiff.nav.nextComment" => {
-            app.jump_next(|r| matches!(r, DRow::CommentHead { .. }), true)
-        }
-        "ambidiff.nav.prevComment" => {
-            app.jump_next(|r| matches!(r, DRow::CommentHead { .. }), false)
-        }
+        "ambidiff.nav.bottom" => match count {
+            Some(line) => app.goto_line(line),
+            None => app.cursor_to(usize::MAX),
+        },
+        "ambidiff.nav.nextHunk" => repeat_motion(app, n, |a| a.jump_hunk(true)),
+        "ambidiff.nav.prevHunk" => repeat_motion(app, n, |a| a.jump_hunk(false)),
+        "ambidiff.nav.nextFile" => repeat_file_motion(app, n, |a| a.next_file(true)),
+        "ambidiff.nav.prevFile" => repeat_file_motion(app, n, |a| a.next_file(false)),
+        "ambidiff.nav.nextComment" => repeat_motion(app, n, |a| {
+            a.jump_next(|r| matches!(r, DRow::CommentHead { .. }), true)
+        }),
+        "ambidiff.nav.prevComment" => repeat_motion(app, n, |a| {
+            a.jump_next(|r| matches!(r, DRow::CommentHead { .. }), false)
+        }),
         "ambidiff.nav.focusSwitch" => {
             app.set_focus(match app.focus() {
                 Focus::Tree => Focus::Diff,
                 Focus::Diff => Focus::Tree,
             });
         }
+        "ambidiff.nav.gotoLine" => app.start_goto(),
         "ambidiff.view.toggleLayout" => app.toggle_mode(),
         "ambidiff.view.toggleWordDiff" => app.toggle_word_diff(),
         "ambidiff.view.toggleTree" => app.toggle_tree(),

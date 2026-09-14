@@ -27,6 +27,7 @@ export interface Editor {
   confirm(title: string, onConfirm: () => void): void;
   help(commands: CommandSpec[]): void;
   search(onSubmit: (query: string) => void): void;
+  lineInput(onSubmit: (line: number) => void): void;
   close(): void;
   isOpen(): boolean;
 }
@@ -180,6 +181,10 @@ export function createEditor(dom: EditorDom): Editor {
       table.appendChild(tr);
     }
     b.appendChild(table);
+    const countHint = document.createElement("div");
+    countHint.className = "hint";
+    countHint.textContent = "123j  repeat a motion (10j, 10k, 10G)";
+    b.appendChild(countHint);
     const hint = document.createElement("div");
     hint.className = "hint";
     hint.textContent = "esc closes";
@@ -189,22 +194,34 @@ export function createEditor(dom: EditorDom): Editor {
     };
   }
 
-  function search(onSubmit: (query: string) => void): void {
+  /** Shared body for a single-input status-style box (search, goto-line):
+   * one text input, a hint line, enter submits, esc cancels. */
+  function inputBox(opts: {
+    placeholder: string;
+    hint: string;
+    filter?: (raw: string) => string;
+    onSubmit: (text: string) => void;
+  }): void {
     const b = box();
     const input = document.createElement("input");
-    input.placeholder = "search in diff";
+    input.placeholder = opts.placeholder;
     b.appendChild(input);
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = "enter searches · esc cancels";
+    hint.textContent = opts.hint;
     b.appendChild(hint);
     input.focus();
+    if (opts.filter) {
+      input.oninput = () => {
+        input.value = opts.filter?.(input.value) ?? input.value;
+      };
+    }
     input.onkeydown = (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        const query = input.value;
+        const text = input.value;
         close();
-        onSubmit(query);
+        opts.onSubmit(text);
       } else if (e.key === "Escape") {
         e.preventDefault();
         close();
@@ -213,5 +230,25 @@ export function createEditor(dom: EditorDom): Editor {
     };
   }
 
-  return { prompt, confirm, help, search, close, isOpen };
+  function search(onSubmit: (query: string) => void): void {
+    inputBox({
+      placeholder: "search in diff",
+      hint: "enter searches · esc cancels",
+      onSubmit,
+    });
+  }
+
+  function lineInput(onSubmit: (line: number) => void): void {
+    inputBox({
+      placeholder: "line number",
+      hint: "enter jumps · esc cancels",
+      filter: (raw) => raw.replace(/\D/g, ""),
+      onSubmit: (text) => {
+        const line = Number.parseInt(text, 10);
+        if (Number.isInteger(line) && line > 0) onSubmit(line);
+      },
+    });
+  }
+
+  return { prompt, confirm, help, search, lineInput, close, isOpen };
 }

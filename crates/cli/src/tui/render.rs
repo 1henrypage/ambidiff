@@ -237,6 +237,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             {
                 let query = search.query.clone();
                 draw_search_bar(frame, app, computed.status, &query);
+            } else if let Some(input) = app.goto_input() {
+                let input = input.to_string();
+                draw_goto_bar(frame, app, computed.status, &input);
             }
         }
     }
@@ -980,7 +983,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(m, _)| format!("  {}", clean(m)))
         .unwrap_or_default();
 
-    let right = format!("{toggles}  ? help ");
+    let count = app
+        .pending_count()
+        .map(|n| format!("  {n}"))
+        .unwrap_or_default();
+    let right = format!("{toggles}{count}  ? help ");
     let pad = (area.width as usize)
         .saturating_sub(left.len() + message.len() + right.len())
         .max(1);
@@ -993,22 +1000,47 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line).style(style), area);
 }
 
-fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect, query: &str) {
-    let theme = app.theme();
-    let count = app.search().map(|s| s.matches.len()).unwrap_or(0);
+/// Shared body for the single-input status-bar prompts (search, goto-line):
+/// `prefix` opens the line (`/` or `:`), `input` is the text typed so far,
+/// and `hint` is the trailing help text.
+fn draw_prompt_bar(
+    frame: &mut Frame,
+    theme: Theme,
+    area: Rect,
+    prefix: &str,
+    input: &str,
+    hint: &str,
+) {
     let line = Line::from(vec![
         Span::styled(
-            format!(" /{}", clean(query)),
+            format!(" {prefix}{}", clean(input)),
             Style::default().bg(theme.status_bg).fg(theme.fg),
         ),
         Span::styled(
-            format!("  ({count} matches)  enter:go esc:cancel"),
+            hint.to_string(),
             Style::default().bg(theme.status_bg).fg(theme.dim),
         ),
     ]);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(theme.status_bg)),
         area,
+    );
+}
+
+fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect, query: &str) {
+    let count = app.search().map(|s| s.matches.len()).unwrap_or(0);
+    let hint = format!("  ({count} matches)  enter:go esc:cancel");
+    draw_prompt_bar(frame, app.theme(), area, "/", query, &hint);
+}
+
+fn draw_goto_bar(frame: &mut Frame, app: &App, area: Rect, input: &str) {
+    draw_prompt_bar(
+        frame,
+        app.theme(),
+        area,
+        ":",
+        input,
+        "  enter:go esc:cancel",
     );
 }
 
@@ -1053,6 +1085,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ]));
     }
     lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " 123j  repeat a motion (10j, 10k, 10G)",
+        Style::default().fg(theme.dim),
+    )));
     lines.push(Line::from(Span::styled(
         " esc or ? closes help \u{b7} wrap: comment cards always, code rows unified only",
         Style::default().fg(theme.dim),

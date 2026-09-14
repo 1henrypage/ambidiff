@@ -246,6 +246,13 @@ export interface SearchMatch {
   end: number;
 }
 
+export type LineSide = "new" | "old";
+
+export type LineTarget =
+  | { kind: "exact"; row: number; side: LineSide }
+  | { kind: "inGap"; row: number; gapId: string }
+  | { kind: "nearest"; row: number | null };
+
 export interface SkippedPath {
   display: string;
   reason: string;
@@ -445,6 +452,19 @@ export function decodeSearchMatch(v: unknown, at = "match"): SearchMatch {
     start: int(o, "start"),
     end: int(o, "end"),
   };
+}
+
+export function decodeLineTarget(v: unknown, at = "lineTarget"): LineTarget {
+  const o = obj(v, at);
+  const kind = lit(o, "kind", ["exact", "inGap", "nearest"] as const);
+  switch (kind) {
+    case "exact":
+      return { kind, row: int(o, "row"), side: lit(o, "side", ["new", "old"] as const) };
+    case "inGap":
+      return { kind, row: int(o, "row"), gapId: str(o, "gapId") };
+    case "nearest":
+      return { kind, row: optInt(o, "row") ?? null };
+  }
 }
 
 export function decodeSkippedPath(v: unknown, at = "skipped"): SkippedPath {

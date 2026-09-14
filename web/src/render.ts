@@ -201,6 +201,9 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
     right.style.marginLeft = "auto";
     dom.statusbar.appendChild(right);
     dom.statusbar.appendChild(span(null, toggles));
+    if (store.pendingCount !== null) {
+      dom.statusbar.appendChild(span("count", String(store.pendingCount)));
+    }
     dom.statusbar.appendChild(span(null, "? help"));
   }
 

@@ -16,6 +16,7 @@ import type {
   FileFilter,
   FileView,
   GapInfo,
+  LineTarget,
   OverviewCommentOwned,
   ProjectionSnapshot,
   SearchMatch,
@@ -83,6 +84,9 @@ export class FakeCore implements Core {
   anchorResult: CoreAnchorTarget | null = null;
   commandTable: CommandSpec[] = [];
   setReviewCalls: string[] = [];
+  /** Set to make the next `gotoLine` call return this instead of "nearest none". */
+  gotoResult: LineTarget | null = null;
+  lastGoto: { path: string; line: number } | null = null;
 
   setReview(content: string): ReviewSummary {
     this.setReviewCalls.push(content);
@@ -172,6 +176,11 @@ export class FakeCore implements Core {
 
   search(_path: string, _query: string): SearchMatch[] {
     return [];
+  }
+
+  gotoLine(path: string, line: number): LineTarget {
+    this.lastGoto = { path, line };
+    return this.gotoResult ?? { kind: "nearest", row: null };
   }
 
   anchorTarget(): CoreAnchorTarget | null {

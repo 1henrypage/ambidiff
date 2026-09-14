@@ -278,6 +278,67 @@ describe("cursor", () => {
   });
 });
 
+describe("count prefix", () => {
+  test("digits_accumulate_and_take_count_reads_then_clears", async () => {
+    const { store } = await bootedOn("a.ts");
+    store.pushCountDigit(1);
+    store.pushCountDigit(0);
+    expect(store.pendingCount).toBe(10);
+    expect(store.takeCount()).toBe(10);
+    expect(store.pendingCount).toBeNull();
+  });
+
+  test("clear_count_resets_to_null", async () => {
+    const { store } = await bootedOn("a.ts");
+    store.pushCountDigit(5);
+    store.clearCount();
+    expect(store.pendingCount).toBeNull();
+  });
+});
+
+describe("goto line", () => {
+  test("exact_target_moves_the_cursor_to_that_row", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    core.gotoResult = { kind: "exact", row: 1, side: "new" };
+    store.gotoLine(2);
+    expect(store.cursor).toBe(1);
+    expect(store.flash).toBeNull();
+    expect(core.lastGoto).toEqual({ path: "a.ts", line: 2 });
+  });
+
+  test("in_gap_target_moves_onto_the_gap_row_and_flashes", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    core.gotoResult = { kind: "inGap", row: 0, gapId: "before:0" };
+    store.gotoLine(3);
+    expect(store.cursor).toBe(0);
+    expect(store.flash).toContain("collapsed");
+  });
+
+  test("nearest_target_moves_to_the_fallback_row_and_flashes", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    core.gotoResult = { kind: "nearest", row: 1 };
+    store.gotoLine(999);
+    expect(store.cursor).toBe(1);
+    expect(store.flash).toContain("not in this diff");
+  });
+
+  test("nearest_with_no_row_only_flashes", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    const before = store.cursor;
+    core.gotoResult = { kind: "nearest", row: null };
+    store.gotoLine(999);
+    expect(store.cursor).toBe(before);
+    expect(store.flash).toContain("not in this diff");
+  });
+
+  test("goto_line_on_the_overview_flashes_instead_of_jumping", async () => {
+    const { store } = await bootedOn("a.ts");
+    store.openOverview();
+    store.gotoLine(1);
+    expect(store.flash).toBe("open a file first");
+  });
+});
+
 describe("filter (B15)", () => {
   test("annotated_filter_includes_file_after_first_comment", async () => {
     const { store, core } = await bootedOn("a.ts");

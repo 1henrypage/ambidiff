@@ -7,6 +7,7 @@
 
 pub mod anchor;
 pub mod commands;
+pub mod goto;
 pub mod highlight;
 pub mod lifecycle;
 pub mod model;

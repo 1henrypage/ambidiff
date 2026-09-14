@@ -30,6 +30,10 @@ use super::wrap;
 /// How long a transient status message stays on the status bar.
 pub const STATUS_TTL: Duration = Duration::from_secs(4);
 
+/// Ceiling for a vim-style count prefix, so `999999999j` cannot overflow the
+/// arithmetic that consumes it.
+const MAX_COUNT: u32 = 1_000_000;
+
 /// What the diff pane is currently showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileTarget {
@@ -228,6 +232,10 @@ pub struct App {
 
     search: Option<SearchState>,
     overlay: Overlay,
+    /// Pending vim-style count prefix (the "10" while typing `10j`).
+    pending_count: Option<u32>,
+    /// The `:` command line, present only while the user is typing it.
+    goto_input: Option<String>,
     status_msg: Option<(String, Instant)>,
     /// The last layout `render::draw` computed; mouse hit-testing reads
     /// this instead of recomputing geometry (B25).
@@ -292,6 +300,8 @@ impl App {
             focus: Focus::Diff,
             search: None,
             overlay: Overlay::None,
+            pending_count: None,
+            goto_input: None,
             status_msg: None,
             last_layout: None,
             reflow_dirty: false,
@@ -420,6 +430,61 @@ impl App {
 
     pub fn open_help(&mut self) {
         self.overlay = Overlay::Help;
+    }
+
+    // ------ count prefix ------
+
+    pub fn pending_count(&self) -> Option<u32> {
+        self.pending_count
+    }
+
+    /// Extend the pending count with one more digit (saturating at
+    /// `MAX_COUNT`).
+    pub fn push_count_digit(&mut self, d: u32) {
+        let next = self
+            .pending_count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(d);
+        self.pending_count = Some(next.min(MAX_COUNT));
+    }
+
+    /// Read and clear the pending count.
+    pub fn take_count(&mut self) -> Option<u32> {
+        self.pending_count.take()
+    }
+
+    pub fn clear_count(&mut self) {
+        self.pending_count = None;
+    }
+
+    // ------ goto-line prompt ------
+
+    pub fn start_goto(&mut self) {
+        self.goto_input = Some(String::new());
+    }
+
+    pub fn goto_input(&self) -> Option<&str> {
+        self.goto_input.as_deref()
+    }
+
+    pub fn goto_input_mut(&mut self) -> Option<&mut String> {
+        self.goto_input.as_mut()
+    }
+
+    pub fn cancel_goto(&mut self) {
+        self.goto_input = None;
+    }
+
+    /// Parse the `:` buffer as a line number, close the prompt, and jump.
+    pub fn submit_goto(&mut self) {
+        let Some(input) = self.goto_input.take() else {
+            return;
+        };
+        match input.parse::<u32>() {
+            Ok(line) => self.goto_line(line),
+            Err(_) => self.flash("not a line number"),
+        }
     }
 
     pub fn open_confirm_delete(&mut self, id: String) {
@@ -1312,15 +1377,59 @@ impl App {
         }
     }
 
+    /// Move the cursor to the display row painting view row `idx`; false
+    /// when no display row currently paints it (e.g. it sits inside a
+    /// collapsed gap or continuation line).
+    fn cursor_to_view_row(&mut self, idx: usize) -> bool {
+        if let Some(pos) = self
+            .display
+            .iter()
+            .position(|d| matches!(d, DRow::View { idx: i, continuation: false, .. } if *i == idx))
+        {
+            self.cursor = pos;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Jump the cursor to the display row showing search match `i`.
     pub fn goto_match(&mut self, i: usize) {
         let Some(s) = &self.search else { return };
         let Some(m) = s.matches.get(i) else { return };
         let row_idx = m.row;
-        if let Some(pos) = self.display.iter().position(
-            |d| matches!(d, DRow::View { idx, continuation: false, .. } if *idx == row_idx),
-        ) {
-            self.cursor = pos;
+        self.cursor_to_view_row(row_idx);
+    }
+
+    /// The `:<num>` motion: resolve `line` against the current view's rows
+    /// and move the cursor there.
+    pub fn goto_line(&mut self, line: u32) {
+        if line == 0 {
+            self.flash("line numbers start at 1");
+            return;
+        }
+        let Some(view) = &self.view else {
+            self.flash("open a file first");
+            return;
+        };
+        use ambidiff_core::goto::{LineTarget, find_line};
+        match find_line(&view.view().rows, line) {
+            LineTarget::Exact { row, .. } => {
+                self.cursor_to_view_row(row);
+            }
+            LineTarget::InGap { row, .. } => {
+                self.cursor_to_view_row(row);
+                self.flash(&format!(
+                    "line {line} is inside a collapsed gap; Enter expands"
+                ));
+            }
+            LineTarget::Nearest { row: Some(row) } => {
+                self.cursor_to_view_row(row);
+                self.flash(&format!("line {line} is not in this diff"));
+            }
+            LineTarget::Nearest { row: None } => {
+                self.flash(&format!("line {line} is not in this diff"));
+            }
         }
     }
 

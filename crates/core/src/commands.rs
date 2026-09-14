@@ -63,6 +63,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         tui: &[","], nvim: &["[c"], web: &[","]),
     cmd!("ambidiff.nav.focusSwitch", "Switch focus", "Switch focus between tree and diff",
         tui: &["Tab"], nvim: &[], web: &["Tab"]),
+    cmd!("ambidiff.nav.gotoLine", "Go to line", "Jump to a line number",
+        tui: &[":"], nvim: &[], web: &[":"]),
     // View toggles
     cmd!("ambidiff.view.toggleLayout", "Toggle layout", "Switch between unified and side-by-side",
         tui: &["s"], nvim: &["gs"], web: &["s"]),
