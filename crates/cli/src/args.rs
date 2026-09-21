@@ -1,5 +1,6 @@
 //! Command-line interface definitions.
 
+use ambidiff_core::review::Source;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -14,6 +15,41 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+    /// TUI options accepted without a subcommand (`ambidiff --commit HEAD`,
+    /// `ambidiff --stack`).
+    #[command(flatten)]
+    pub tui: TuiArgs,
+}
+
+/// How to choose the comparison when opening a frontend without (or ahead
+/// of) a review file, and what `init` records. Absent means today's
+/// meaning: the review file decides, and `init` records a base.
+#[derive(Args, Default, Clone, Debug)]
+pub struct SourceFlags {
+    /// Review one commit (a ref like HEAD, abc123, or main~2) against its
+    /// first parent
+    #[arg(long, value_name = "REF", conflicts_with_all = ["stack", "upstream"])]
+    pub commit: Option<String>,
+    /// Review a stack of PR branches above trunk, one target per branch
+    #[arg(long)]
+    pub stack: bool,
+    /// The trunk the stack sits on (default: origin/HEAD, then origin/main,
+    /// origin/master, main, master)
+    #[arg(long, value_name = "REF", requires = "stack")]
+    pub upstream: Option<String>,
+}
+
+impl SourceFlags {
+    /// The review source these flags ask for, if any.
+    pub fn source(&self) -> Option<Source> {
+        if let Some(spec) = &self.commit {
+            return Some(Source::git_commit(spec.clone()));
+        }
+        if self.stack {
+            return Some(Source::git_stack(self.upstream.clone()));
+        }
+        None
+    }
 }
 
 #[derive(Subcommand)]
@@ -45,11 +81,13 @@ pub struct InitArgs {
     pub review: Option<String>,
     /// Git base to diff against (a ref like "main", or a range "A..B");
     /// omitted means working tree vs index
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["commit", "stack"])]
     pub base: Option<String>,
     /// Review staged changes only
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["commit", "stack"])]
     pub staged: bool,
+    #[command(flatten)]
+    pub source: SourceFlags,
     /// Machine-readable output
     #[arg(long)]
     pub json: bool,
@@ -106,6 +144,11 @@ pub struct CommentAddArgs {
     /// Author name (default: $AMBIDIFF_AUTHOR, then $USER)
     #[arg(long)]
     pub author: Option<String>,
+    /// Stack target the comment is made against: a PR branch name, or
+    /// "stack", "worktree", "head" ("branch:<name>" forces a branch).
+    /// Required for path comments in a stack review
+    #[arg(long, value_name = "TARGET")]
+    pub target: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     pub json: bool,
@@ -122,6 +165,9 @@ pub struct CommentListArgs {
     /// Filter by file path
     #[arg(long, short = 'p')]
     pub path: Option<String>,
+    /// Filter by stack target (same spellings as `comment add --target`)
+    #[arg(long, value_name = "TARGET")]
+    pub target: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     pub json: bool,
@@ -196,6 +242,8 @@ pub struct TuiArgs {
     /// Use the light theme
     #[arg(long)]
     pub light: bool,
+    #[command(flatten)]
+    pub source: SourceFlags,
 }
 
 #[derive(Args)]
@@ -203,6 +251,8 @@ pub struct EngineArgs {
     /// Speak newline-delimited JSON on stdin/stdout (required)
     #[arg(long)]
     pub stdio: bool,
+    #[command(flatten)]
+    pub source: SourceFlags,
 }
 
 #[derive(Args)]
@@ -213,4 +263,40 @@ pub struct WebArgs {
     /// Open the browser automatically
     #[arg(long)]
     pub open: bool,
+    #[command(flatten)]
+    pub source: SourceFlags,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn source_flags_parse_without_a_subcommand_and_map_to_sources() {
+        let cli = Cli::parse_from(["ambidiff", "--commit", "HEAD"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.tui.source.source(), Some(Source::git_commit("HEAD")));
+        let cli = Cli::parse_from(["ambidiff", "--stack", "--upstream", "origin/main"]);
+        assert_eq!(
+            cli.tui.source.source(),
+            Some(Source::git_stack(Some("origin/main".into())))
+        );
+        let cli = Cli::parse_from(["ambidiff"]);
+        assert_eq!(cli.tui.source.source(), None);
+        let cli = Cli::parse_from(["ambidiff", "web", "--stack"]);
+        let Some(Command::Web(web)) = cli.command else {
+            panic!("web subcommand");
+        };
+        assert!(web.source.stack);
+    }
+
+    #[test]
+    fn conflicting_source_flags_are_rejected() {
+        assert!(Cli::try_parse_from(["ambidiff", "--commit", "HEAD", "--stack"]).is_err());
+        assert!(Cli::try_parse_from(["ambidiff", "--upstream", "main"]).is_err());
+        assert!(Cli::try_parse_from(["ambidiff", "init", "--base", "main", "--stack"]).is_err());
+        assert!(Cli::try_parse_from(["ambidiff", "init", "--staged", "--commit", "HEAD"]).is_err());
+        assert!(Cli::try_parse_from(["ambidiff", "init", "--stack", "--upstream", "main"]).is_ok());
+    }
 }

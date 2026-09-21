@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 
 use ambidiff_core::review::REVIEW_FILE_NAME;
 use ambidiff_core::util::fnv1a64;
-use ambidiff_core::watch::{Refresh, SignatureFn, WatchConfig, WatchController};
+use ambidiff_core::watch::{
+    REVIEW_ABSENT_SIGNATURE, Refresh, SignatureFn, WatchConfig, WatchController,
+    review_file_signature,
+};
 
 fn file_sig(path: &Path) -> u64 {
     std::fs::read(path).map(|b| fnv1a64(&b)).unwrap_or(0)
@@ -317,4 +320,36 @@ fn signature_failure_surfaces_via_refresh_and_last_error() {
         "a Failed -> Value transition must also emit a Diff refresh"
     );
     assert_eq!(controller.last_diff_error(), None);
+}
+
+/// An unsaved (ephemeral) session watches a root with no review file: the
+/// absent file is a stable, non-error signature, and its creation is a
+/// review change.
+#[test]
+fn absent_review_file_is_a_stable_signature_and_creation_fires_review() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let review_path = root.join(REVIEW_FILE_NAME);
+    assert_eq!(
+        review_file_signature(&review_path),
+        Ok(REVIEW_ABSENT_SIGNATURE)
+    );
+    assert_ne!(REVIEW_ABSENT_SIGNATURE, 0, "never folded to zero");
+
+    let path = review_path.clone();
+    let review_sig: SignatureFn = Arc::new(move || review_file_signature(&path));
+    let diff_sig = checked(|| 1);
+    let controller = WatchController::start_checked(config(root), diff_sig, review_sig);
+    assert_quiet(&controller, Duration::from_millis(300));
+
+    std::fs::write(&review_path, "{\"ambidiff\":1}").expect("create review");
+    assert!(
+        wait_for(&controller, Refresh::Review, Duration::from_secs(5)),
+        "creating the review file is a review change"
+    );
+    assert_ne!(
+        review_file_signature(&review_path),
+        Ok(REVIEW_ABSENT_SIGNATURE)
+    );
+    controller.stop();
 }

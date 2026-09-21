@@ -15,13 +15,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton
 use ratatui::layout::Rect;
 
 use crate::args::TuiArgs;
-use crate::context::resolve_store;
+use crate::context::open_application;
 use app::{App, ConfirmAction, DRow, EditorIntent, FileTarget, Focus, Overlay};
 use render::Hit;
 
 pub fn run(args: TuiArgs) -> Result<i32> {
-    let store = resolve_store()?;
-    let mut app = App::open(store, args.split, args.light)?;
+    let application = open_application(&args.source)?;
+    let mut app = App::open(application, args.split, args.light)?;
 
     let mut terminal = ratatui::try_init()?;
     // Restore the terminal even if the loop panics.
@@ -124,6 +124,16 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
             ) {
                 app.discard_editor();
+            }
+            return;
+        }
+        Overlay::TargetPicker { .. } => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => app.discard_editor(),
+                KeyCode::Char('j') | KeyCode::Down => app.picker_move(1),
+                KeyCode::Char('k') | KeyCode::Up => app.picker_move(-1),
+                KeyCode::Enter => app.picker_confirm(),
+                _ => {}
             }
             return;
         }
@@ -440,6 +450,9 @@ fn run_command(app: &mut App, command: &str, count: Option<u32>) {
             }
         }
         "ambidiff.review.resolveAddressed" => app.request_resolve_addressed(),
+        "ambidiff.target.next" => app.select_target_delta(n),
+        "ambidiff.target.prev" => app.select_target_delta(-n),
+        "ambidiff.target.pick" => app.open_target_picker(),
         "ambidiff.search.start" => app.start_search(),
         "ambidiff.search.next" => app.search_step(true),
         "ambidiff.search.prev" => app.search_step(false),
@@ -460,8 +473,14 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) {
         MouseEventKind::Down(MouseButton::Left) => {
             let layout = render::current_layout(app, area);
             let hit = layout.hit(mouse.column, mouse.row);
+            let strip_width = layout.strip.map(|s| s.width as usize).unwrap_or(0);
             app.apply_layout(layout);
             match hit {
+                Hit::Strip { col } => {
+                    if let Some(index) = render::strip_cell_at(app, strip_width, col) {
+                        app.select_target_index(index);
+                    }
+                }
                 Hit::Tree(row) => {
                     app.set_focus(Focus::Tree);
                     if row < app.tree_len() {

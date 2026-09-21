@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use ambidiff_core::anchor::{ActiveCell, RowAnchor, anchor_target};
 use ambidiff_core::highlight::ThemeChoice;
 use ambidiff_core::model::FileDiffKind;
-use ambidiff_core::projection::{FileCounts, FileFilter, ReviewProjection};
+use ambidiff_core::projection::{FileCounts, FileFilter, TargetCounts};
 use ambidiff_core::protocol::{CommentAddRequest, CommentEditRequest, LifecycleRequest};
 use ambidiff_core::review::{Action, Actor, Comment, Side};
 use ambidiff_core::rows::{Row, ViewMode};
 use ambidiff_core::search::{SearchMatch, search_rows};
-use ambidiff_core::store::Store;
+use ambidiff_core::source::CommitSummary;
+use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::tree::TreeRow;
 use ambidiff_core::view::ViewOptions;
 use ambidiff_core::view_state::ViewState;
@@ -171,6 +172,10 @@ pub enum Overlay {
     Help,
     Editor(Box<EditorState>),
     Confirm(ConfirmAction),
+    /// The stack target picker (`p`); `cursor` indexes `App::targets`.
+    TargetPicker {
+        cursor: usize,
+    },
 }
 
 /// What a `y` in the confirm overlay does; `render` picks title/body/hint
@@ -197,6 +202,17 @@ struct PaneComment {
     index: usize,
     anchor: RowAnchor,
     was_path: Option<String>,
+    /// The target this comment was made on when that target has left the
+    /// stack (the `[was on X]` badge).
+    was_on: Option<String>,
+}
+
+/// One overview entry: a review-level or unattached comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverviewEntry {
+    index: usize,
+    unattached: bool,
+    was_on: Option<String>,
 }
 
 /// Everything the file list needs to paint, derived once per snapshot/
@@ -207,10 +223,12 @@ struct PaneComment {
 #[derive(Default)]
 struct Projected {
     tree_rows: Vec<TreeRow>,
-    /// (comment index, unattached) pairs, review-level first.
-    overview: Vec<(usize, bool)>,
+    /// Review-level entries first, then the unattached group.
+    overview: Vec<OverviewEntry>,
     review_counts: FileCounts,
     file_counts: std::collections::BTreeMap<String, FileCounts>,
+    /// One tally per live target, in stack order (the strip's counts).
+    target_counts: Vec<TargetCounts>,
 }
 
 pub struct App {
@@ -268,8 +286,7 @@ struct CursorMemento {
 }
 
 impl App {
-    pub fn open(store: Store, split: bool, light: bool) -> anyhow::Result<App> {
-        let mut application = Application::open(store);
+    pub fn open(mut application: Application, split: bool, light: bool) -> anyhow::Result<App> {
         // Arm the watch BEFORE the first load: a write landing between the
         // load and a later watch start would be absorbed into the baseline
         // and never converge on screen. A watch failure is non-fatal: it
@@ -440,6 +457,122 @@ impl App {
         self.overlay = Overlay::Help;
     }
 
+    // ------ stack targets ------
+
+    pub fn is_stack(&self) -> bool {
+        self.snapshot.is_stack()
+    }
+
+    pub fn targets(&self) -> &[Target] {
+        &self.snapshot.targets
+    }
+
+    /// Index of the selected target in `targets`, if any.
+    pub fn selected_index(&self) -> Option<usize> {
+        let selected = self.snapshot.selected.as_ref()?;
+        self.snapshot.targets.iter().position(|t| &t.id == selected)
+    }
+
+    pub fn selected_label(&self) -> Option<&str> {
+        self.snapshot.selected.as_ref().map(TargetId::label)
+    }
+
+    /// The reviewed commit of a single-commit review (the banner).
+    pub fn commit_summary(&self) -> Option<&CommitSummary> {
+        self.snapshot.commit.as_ref()
+    }
+
+    /// The trunk a stack review sits on.
+    pub fn trunk(&self) -> Option<&str> {
+        self.snapshot.trunk.as_deref()
+    }
+
+    /// True while the review exists only in this process (`--commit` /
+    /// `--stack` without a review file); the first comment writes it.
+    pub fn is_unsaved(&self) -> bool {
+        self.app.is_unsaved()
+    }
+
+    /// The tally of comments made on `id` (the strip and the picker).
+    pub fn target_counts(&self, id: &TargetId) -> FileCounts {
+        self.projected
+            .target_counts
+            .iter()
+            .find(|t| &t.id == id)
+            .map(|t| t.counts)
+            .unwrap_or_default()
+    }
+
+    pub fn open_target_picker(&mut self) {
+        if !self.is_stack() || self.snapshot.targets.is_empty() {
+            self.flash("not a stack review");
+            return;
+        }
+        self.overlay = Overlay::TargetPicker {
+            cursor: self.selected_index().unwrap_or(0),
+        };
+    }
+
+    pub fn picker_move(&mut self, delta: i64) {
+        let len = self.snapshot.targets.len();
+        if let Overlay::TargetPicker { cursor } = &mut self.overlay
+            && len > 0
+        {
+            *cursor = (*cursor as i64 + delta).clamp(0, len as i64 - 1) as usize;
+        }
+    }
+
+    pub fn picker_confirm(&mut self) {
+        let Overlay::TargetPicker { cursor } = self.overlay else {
+            return;
+        };
+        self.overlay = Overlay::None;
+        self.select_target_index(cursor);
+    }
+
+    /// Select the target at `index` in the strip / picker order.
+    pub fn select_target_index(&mut self, index: usize) {
+        let Some(target) = self.snapshot.targets.get(index) else {
+            return;
+        };
+        let id = target.id.clone();
+        self.select_target_id(id);
+    }
+
+    /// `)` / `(`: step through the targets, flashing at either end.
+    pub fn select_target_delta(&mut self, delta: i64) {
+        if !self.is_stack() || self.snapshot.targets.is_empty() {
+            self.flash("not a stack review");
+            return;
+        }
+        let len = self.snapshot.targets.len() as i64;
+        let current = self.selected_index().unwrap_or(0) as i64;
+        let next = current + delta;
+        if next < 0 {
+            self.flash("bottom of stack");
+        } else if next >= len {
+            self.flash("top of stack");
+        } else {
+            self.select_target_index(next as usize);
+        }
+    }
+
+    /// Select a target: the application rebuilds its source and re-lists
+    /// (same mechanics as a `source` change), then the usual diff refresh
+    /// reconciles the open file and the cursor.
+    pub fn select_target_id(&mut self, id: TargetId) {
+        if self.snapshot.selected.as_ref() == Some(&id) {
+            return;
+        }
+        if let Err(err) = self.app.select_target(id) {
+            self.flash(&format!("target: {err}"));
+            return;
+        }
+        self.refresh(RefreshKind::Diff);
+        let label = self.selected_label().unwrap_or("?").to_string();
+        self.flash(&format!("target: {label}"));
+    }
+
     // ------ count prefix ------
 
     pub fn pending_count(&self) -> Option<u32> {
@@ -550,6 +683,12 @@ impl App {
         std::mem::take(&mut self.reflow_dirty)
     }
 
+    /// The strip row of the last computed layout (tests).
+    #[cfg(test)]
+    pub fn last_layout_strip(&self) -> Option<ratatui::layout::Rect> {
+        self.last_layout.as_ref().and_then(|l| l.strip)
+    }
+
     pub fn set_scroll(&mut self, scroll: usize) {
         self.scroll = scroll;
     }
@@ -558,10 +697,20 @@ impl App {
         self.active_cell = cell;
     }
 
-    pub fn pane_comment(&self, pane_idx: usize) -> Option<(&Comment, &RowAnchor, Option<&str>)> {
+    /// The comment a pane index refers to, with its anchor, rename badge,
+    /// and was-on badge.
+    pub fn pane_comment(
+        &self,
+        pane_idx: usize,
+    ) -> Option<(&Comment, &RowAnchor, Option<&str>, Option<&str>)> {
         let pane = self.pane.get(pane_idx)?;
         let comment = self.snapshot.review.comments.get(pane.index)?;
-        Some((comment, &pane.anchor, pane.was_path.as_deref()))
+        Some((
+            comment,
+            &pane.anchor,
+            pane.was_path.as_deref(),
+            pane.was_on.as_deref(),
+        ))
     }
 
     // ---------------------------------------------------------- projection
@@ -569,13 +718,16 @@ impl App {
     /// Rebuild the filtered tree, overview, and per-file tallies from the
     /// current snapshot + filter + collapsed set (S1, B15).
     fn reproject(&mut self) {
-        let projection =
-            ReviewProjection::new(&self.snapshot.review, &self.snapshot.files, self.filter);
+        let projection = self.snapshot.projection(self.filter);
         let tree_rows = projection.tree_rows(&self.collapsed);
         let overview = projection
             .overview()
             .into_iter()
-            .map(|o| (o.index, o.unattached))
+            .map(|o| OverviewEntry {
+                index: o.index,
+                unattached: o.unattached,
+                was_on: o.was_on.map(str::to_string),
+            })
             .collect();
         let review_counts = projection.review_level();
         let file_counts = self
@@ -584,11 +736,13 @@ impl App {
             .iter()
             .map(|f| (f.path.clone(), projection.counts_for(&f.path)))
             .collect();
+        let target_counts = projection.target_counts().to_vec();
         self.projected = Projected {
             tree_rows,
             overview,
             review_counts,
             file_counts,
+            target_counts,
         };
         if self.tree_cursor >= self.tree_len() {
             self.tree_cursor = self.tree_len().saturating_sub(1);
@@ -683,14 +837,24 @@ impl App {
     /// if needed (B12), and restore the cursor from a memento.
     fn refresh(&mut self, kind: RefreshKind) {
         let memento = self.memento();
+        let previous_warnings = std::mem::take(&mut self.snapshot.warnings);
         match self.app.load() {
             Ok(snapshot) => self.snapshot = snapshot.clone(),
             Err(err) => {
+                self.snapshot.warnings = previous_warnings;
                 self.flash(&format!("reload failed: {err}"));
                 return;
             }
         }
         self.reproject();
+        // A selection that moved without the user asking (its branch left
+        // the stack) arrives as a fresh source warning; say so.
+        let fallback_notice = self
+            .snapshot
+            .warnings
+            .iter()
+            .find(|w| w.contains("left the stack") && !previous_warnings.contains(w))
+            .cloned();
 
         let resolution = resolve_target(&memento.target, &self.snapshot.files);
         let (new_target, vanished_notice) = match resolution {
@@ -715,7 +879,7 @@ impl App {
         self.restore_cursor(&memento);
         self.sync_tree_cursor();
 
-        match vanished_notice {
+        match fallback_notice.or(vanished_notice) {
             Some(notice) => self.flash(&notice),
             None => self.flash(match kind {
                 RefreshKind::Diff => "diff refreshed",
@@ -999,15 +1163,15 @@ impl App {
             .projected
             .overview
             .iter()
-            .filter(|(_, unattached)| !unattached)
-            .map(|(idx, _)| *idx)
+            .filter(|o| !o.unattached)
+            .map(|o| o.index)
             .collect();
-        let unattached: Vec<usize> = self
+        let unattached: Vec<OverviewEntry> = self
             .projected
             .overview
             .iter()
-            .filter(|(_, unattached)| *unattached)
-            .map(|(idx, _)| *idx)
+            .filter(|o| o.unattached)
+            .cloned()
             .collect();
 
         if review_level.is_empty() && unattached.is_empty() {
@@ -1027,6 +1191,7 @@ impl App {
                     clamped: false,
                 },
                 was_path: None,
+                was_on: None,
             });
             Self::push_comment_card(
                 display,
@@ -1038,12 +1203,24 @@ impl App {
         }
 
         if !unattached.is_empty() {
+            let gone_targets = unattached.iter().filter(|o| o.was_on.is_some()).count();
+            let heading = match gone_targets {
+                0 => format!(
+                    "unattached ({}) - files no longer in this diff",
+                    unattached.len()
+                ),
+                n if n == unattached.len() => {
+                    format!("unattached ({n}) - targets no longer in the stack")
+                }
+                n => format!(
+                    "unattached ({}) - files no longer in this diff, {n} from targets no longer in the stack",
+                    unattached.len()
+                ),
+            };
             display.push(DRow::Blank);
-            display.push(DRow::SectionHead(format!(
-                "unattached ({}) - files no longer in this diff",
-                unattached.len()
-            )));
-            for idx in unattached {
+            display.push(DRow::SectionHead(heading));
+            for entry in unattached {
+                let idx = entry.index;
                 let pane_idx = self.pane.len();
                 self.pane.push(PaneComment {
                     index: idx,
@@ -1054,6 +1231,7 @@ impl App {
                         clamped: false,
                     },
                     was_path: None,
+                    was_on: entry.was_on,
                 });
                 let comment = &self.snapshot.review.comments[idx];
                 let trailer = comment.snippet.as_deref().map(|s| format!("snippet: {s}"));
@@ -1080,8 +1258,7 @@ impl App {
             FileDiffKind::Text => {}
         }
 
-        let projection =
-            ReviewProjection::new(&self.snapshot.review, &self.snapshot.files, self.filter);
+        let projection = self.snapshot.projection(self.filter);
         let file_projection = view.file_projection(&projection);
         self.pane = file_projection
             .comments
@@ -1090,6 +1267,7 @@ impl App {
                 index: ac.index,
                 anchor: ac.anchor.clone(),
                 was_path: ac.was_path.map(str::to_string),
+                was_on: None,
             })
             .collect();
 
@@ -1514,12 +1692,17 @@ impl App {
             self.flash(&format!("review file is read-only ({reason})"));
             return;
         }
+        let target_suffix = self
+            .selected_label()
+            .filter(|_| self.is_stack())
+            .map(|label| format!(" [{label}]"))
+            .unwrap_or_default();
         let (title, initial, single) = match &intent {
             EditorIntent::NewComment { path, line, .. } => (
                 match (path, line) {
-                    (Some(p), Some(l)) => format!("comment on {p}:{l}"),
-                    (Some(p), None) => format!("comment on {p}"),
-                    _ => "comment on review".to_string(),
+                    (Some(p), Some(l)) => format!("comment on {p}:{l}{target_suffix}"),
+                    (Some(p), None) => format!("comment on {p}{target_suffix}"),
+                    _ => format!("comment on review{target_suffix}"),
                 },
                 String::new(),
                 false,
@@ -1576,6 +1759,13 @@ impl App {
             self.flash("save failed");
             return;
         }
+        // A comment made while looking at a stack target is tagged with it,
+        // so it hides from the other PRs of the stack.
+        let target = if self.snapshot.is_stack() {
+            self.snapshot.selected.clone()
+        } else {
+            None
+        };
         let (cmd, ok_msg) = match &state.intent {
             EditorIntent::NewComment { path, side, line } => (
                 ReviewCommand::Add(CommentAddRequest {
@@ -1583,7 +1773,7 @@ impl App {
                     side: *side,
                     line: *line,
                     end_line: None,
-                    target: None,
+                    target,
                     body: text,
                     author: None,
                 }),
@@ -1677,6 +1867,7 @@ impl App {
 mod tests {
     use super::*;
     use ambidiff_core::model::{FileEntry, FileStatus};
+    use ambidiff_core::store::Store;
 
     fn entry(path: &str, old_path: Option<&str>) -> FileEntry {
         FileEntry {
@@ -1878,7 +2069,7 @@ mod tests {
             "t",
         );
         store.init(&review).expect("init");
-        let mut app = App::open(store, false, false).expect("open");
+        let mut app = App::open(Application::open(store), false, false).expect("open");
         app.app
             .execute(ReviewCommand::Add(CommentAddRequest {
                 path: None,
@@ -1897,6 +2088,7 @@ mod tests {
     fn layout_inputs() -> render::LayoutInputs {
         render::LayoutInputs {
             show_tree: false,
+            show_strip: false,
             line_numbers: true,
             mode: ViewMode::Unified,
             tree_cursor: 0,

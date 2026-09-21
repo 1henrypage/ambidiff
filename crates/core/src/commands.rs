@@ -105,6 +105,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd!("ambidiff.review.deleteComment", "Delete comment",
         "Delete the comment at the cursor (no confirm once resolved)",
         tui: &["D"], nvim: &["gD"], web: &["D"]),
+    // Targets (stacked PRs / single commits)
+    cmd!("ambidiff.target.next", "Next target", "Select the next target up the stack",
+        tui: &[")"], nvim: &["]t"], web: &[")"]),
+    cmd!("ambidiff.target.prev", "Previous target", "Select the previous target down the stack",
+        tui: &["("], nvim: &["[t"], web: &["("]),
+    cmd!("ambidiff.target.pick", "Pick target", "Open the target picker",
+        tui: &["p"], nvim: &[], web: &["p"]),
     // Search
     cmd!("ambidiff.search.start", "Search", "Search within the diff",
         tui: &["/"], nvim: &["/"], web: &["/"]),
@@ -164,6 +171,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn web_chords_do_not_collide() {
+        let mut seen = HashSet::new();
+        for c in COMMANDS {
+            for chord in c.web {
+                assert!(
+                    seen.insert(*chord),
+                    "web chord {chord} bound twice ({})",
+                    c.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn target_commands_complete_the_bracket_ladder() {
+        assert_eq!(find("ambidiff.target.next").expect("next").tui, &[")"]);
+        assert_eq!(find("ambidiff.target.prev").expect("prev").tui, &["("]);
+        assert_eq!(find("ambidiff.target.pick").expect("pick").tui, &["p"]);
+        assert_eq!(find("ambidiff.target.next").expect("next").nvim, &["]t"]);
     }
 
     #[test]

@@ -25,6 +25,23 @@ use notify::{RecursiveMode, Watcher};
 /// confuses "the signature is 0" with "we could not compute it".
 pub type SignatureFn = Arc<dyn Fn() -> Result<u64, String> + Send + Sync>;
 
+/// The review-file signature of a root that has no review file yet. A
+/// fixed non-zero value rather than an error: an unsaved (ephemeral)
+/// session watches a root whose `.ambidiff.json` does not exist, and the
+/// file appearing must read as a change (absent -> content hash), not as a
+/// failure clearing up.
+pub const REVIEW_ABSENT_SIGNATURE: u64 = 0x616d_6269_6469_6666; // "ambidiff"
+
+/// The review file's content hash, or [`REVIEW_ABSENT_SIGNATURE`] when it
+/// does not exist; any other read failure is the error state.
+pub fn review_file_signature(path: &std::path::Path) -> Result<u64, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(crate::util::fnv1a64(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(REVIEW_ABSENT_SIGNATURE),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
 /// What changed, as delivered to the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {

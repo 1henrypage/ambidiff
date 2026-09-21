@@ -42,6 +42,8 @@ fn clean(s: &str) -> String {
 /// state, no rendering side effects.
 pub struct LayoutInputs {
     pub show_tree: bool,
+    /// Stack reviews get a one-row target strip across the top.
+    pub show_strip: bool,
     pub line_numbers: bool,
     pub mode: ViewMode,
     pub tree_cursor: usize,
@@ -60,6 +62,10 @@ pub enum Hit {
         offset: usize,
         cell: ActiveCell,
     },
+    /// The target strip, at a column relative to the strip's left edge.
+    Strip {
+        col: usize,
+    },
     None,
 }
 
@@ -68,6 +74,8 @@ pub enum Hit {
 /// (B25).
 #[derive(Debug, Clone)]
 pub struct Layout {
+    /// The target strip row (stack reviews only).
+    pub strip: Option<Rect>,
     pub tree: Option<Rect>,
     pub diff: Rect,
     pub status: Rect,
@@ -86,6 +94,15 @@ impl Layout {
     /// Translate a terminal (x, y) into a pane hit. The hidden tree is
     /// never hit even if the mouse lands where it would otherwise be.
     pub fn hit(&self, x: u16, y: u16) -> Hit {
+        if let Some(strip) = self.strip
+            && y == strip.y
+            && x >= strip.x
+            && x < strip.x + strip.width
+        {
+            return Hit::Strip {
+                col: (x - strip.x) as usize,
+            };
+        }
         if let Some(tree) = self.tree
             && x >= tree.x
             && x < tree.x + tree.width
@@ -133,12 +150,21 @@ fn gutter_width_for(line_numbers: bool, max_line_number: u32) -> usize {
 /// Compute this frame's pane geometry. Pure: no terminal or `App` state
 /// beyond `inputs` and the area ratatui gave us.
 pub fn layout(inputs: &LayoutInputs, area: Rect) -> Layout {
+    let mut constraints = Vec::with_capacity(3);
+    if inputs.show_strip {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(1));
     let vertical = RLayout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints(constraints)
         .split(area);
-    let body = vertical[0];
-    let status = vertical[1];
+    let (strip, body, status) = if inputs.show_strip {
+        (Some(vertical[0]), vertical[1], vertical[2])
+    } else {
+        (None, vertical[0], vertical[1])
+    };
 
     let (tree, diff) = if inputs.show_tree && body.width > TREE_WIDTH + 20 {
         let chunks = RLayout::default()
@@ -168,6 +194,7 @@ pub fn layout(inputs: &LayoutInputs, area: Rect) -> Layout {
         .saturating_sub(tree_height.saturating_sub(1));
 
     Layout {
+        strip,
         tree,
         diff,
         status,
@@ -204,6 +231,7 @@ fn max_line_number(app: &App) -> u32 {
 pub fn current_layout(app: &App, area: Rect) -> Layout {
     let inputs = LayoutInputs {
         show_tree: app.show_tree(),
+        show_strip: app.is_stack(),
         line_numbers: app.line_numbers(),
         mode: app.mode(),
         tree_cursor: app.tree_cursor(),
@@ -221,6 +249,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let computed = current_layout(app, area);
 
+    if let Some(strip_area) = computed.strip {
+        draw_strip(frame, app, strip_area);
+    }
     if let Some(tree_area) = computed.tree {
         draw_tree(frame, app, tree_area, computed.tree_scroll);
     }
@@ -231,6 +262,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::Help => draw_help(frame, app, area),
         Overlay::Editor(_) => draw_editor(frame, app, area),
         Overlay::Confirm(action) => draw_confirm(frame, app, area, &action.clone()),
+        Overlay::TargetPicker { cursor } => draw_target_picker(frame, app, area, *cursor),
         Overlay::None => {
             if let Some(search) = app.search()
                 && search.typing
@@ -247,6 +279,112 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let status_area = computed.status;
     app.apply_layout(computed);
     let _ = status_area;
+}
+
+// ---------- target strip ----------
+
+/// One painted target in the strip, with its column span measured in
+/// display cells. `draw_strip` paints exactly these cells and the mouse
+/// hit-test reads the same spans, so paint and click can never disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripCell {
+    /// Index into `App::targets`.
+    pub target: usize,
+    pub x0: usize,
+    pub x1: usize,
+    pub text: String,
+    pub selected: bool,
+}
+
+/// The strip cells that fit in `width`: `[ ]` frames the selected target,
+/// a position prefixes PR branches, and `\u{25cb}todo/total` follows any
+/// target with comments. Cells past the right edge are dropped whole.
+pub fn strip_cells(app: &App, width: usize) -> Vec<StripCell> {
+    let selected = app.selected_index();
+    let mut cells = Vec::new();
+    let mut x = 0usize;
+    for (index, target) in app.targets().iter().enumerate() {
+        let counts = app.target_counts(&target.id);
+        let mut label = String::new();
+        if let Some(position) = target.position {
+            label.push_str(&format!("{position} "));
+        }
+        label.push_str(&clean(&target.label));
+        if counts.total > 0 {
+            label.push_str(&format!(" \u{25cb}{}/{}", counts.todo, counts.total));
+        }
+        let is_selected = selected == Some(index);
+        let text = if is_selected {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        };
+        let w = wrap::display_width(&text);
+        if x + w > width {
+            break;
+        }
+        cells.push(StripCell {
+            target: index,
+            x0: x,
+            x1: x + w,
+            text,
+            selected: is_selected,
+        });
+        x += w + 1;
+    }
+    cells
+}
+
+/// The target a click at `col` of a `width`-wide strip lands on.
+pub fn strip_cell_at(app: &App, width: usize, col: usize) -> Option<usize> {
+    strip_cells(app, width)
+        .into_iter()
+        .find(|c| col >= c.x0 && col < c.x1)
+        .map(|c| c.target)
+}
+
+fn draw_strip(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let base = Style::default().bg(theme.banner_bg).fg(theme.fg);
+    let width = area.width as usize;
+    let cells = strip_cells(app, width);
+    let mut spans: Vec<Span> = Vec::new();
+    let mut x = 0usize;
+    for cell in &cells {
+        if cell.x0 > x {
+            spans.push(Span::styled(" ".repeat(cell.x0 - x), base));
+        }
+        let style = if cell.selected {
+            base.bg(theme.tree_selected_bg).add_modifier(Modifier::BOLD)
+        } else {
+            base.fg(theme.dim)
+        };
+        spans.push(Span::styled(cell.text.clone(), style));
+        x = cell.x1;
+    }
+    if cells.is_empty() {
+        let text = " no targets: HEAD is at trunk and the tree is clean ";
+        spans.push(Span::styled(text.to_string(), base.fg(theme.dim)));
+        x = wrap::display_width(text);
+    }
+    // The selected target's subject, right-aligned, when it fits.
+    if let Some(subject) = app
+        .selected_index()
+        .and_then(|i| app.targets().get(i))
+        .and_then(|t| t.subject.as_deref())
+    {
+        let subject = clean(subject);
+        let w = wrap::display_width(&subject);
+        if x + 2 + w < width {
+            spans.push(Span::styled(" ".repeat(width - x - w - 1), base));
+            spans.push(Span::styled(subject, base.fg(theme.dim)));
+            x = width - 1;
+        }
+    }
+    if x < width {
+        spans.push(Span::styled(" ".repeat(width - x), base));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
 }
 
 // ---------- tree ----------
@@ -476,6 +614,16 @@ fn banner_line(app: &App) -> Line<'static> {
                 ),
                 style.fg(theme.dim),
             ));
+            if let Some(commit) = app.commit_summary() {
+                spans.push(Span::styled(
+                    format!(
+                        "  commit {} {}",
+                        commit.oid.get(..8).unwrap_or(&commit.oid),
+                        clean(&commit.subject)
+                    ),
+                    style.fg(theme.hunk_fg),
+                ));
+            }
         }
         FileTarget::File(path) => {
             if let Some(entry) = app.files().iter().find(|e| &e.path == path) {
@@ -534,7 +682,7 @@ fn comment_head_line(app: &App, pane_idx: usize, is_cursor: bool, width: usize) 
         theme.comment_bg
     };
     let base = Style::default().bg(card_bg);
-    let Some((comment, anchor, _was_path)) = app.pane_comment(pane_idx) else {
+    let Some((comment, anchor, _was_path, was_on)) = app.pane_comment(pane_idx) else {
         return Line::default();
     };
     let comment: &Comment = comment;
@@ -570,6 +718,12 @@ fn comment_head_line(app: &App, pane_idx: usize, is_cursor: bool, width: usize) 
     if anchor.outdated {
         spans.push(Span::styled(
             "[outdated] ".to_string(),
+            base.fg(theme.warn_fg).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(was_on) = was_on {
+        spans.push(Span::styled(
+            format!("[was on {}] ", clean(was_on)),
             base.fg(theme.warn_fg).add_modifier(Modifier::BOLD),
         ));
     }
@@ -962,8 +1116,19 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.read_only() {
         left.push_str("  [read-only]");
     }
+    if app.is_unsaved() {
+        left.push_str("  [unsaved]");
+    }
     if app.filter() != ambidiff_core::projection::FileFilter::All {
         left.push_str(&format!("  filter:{}", app.filter().label()));
+    }
+    if app.is_stack() {
+        left.push_str(&format!(
+            "  target:{}",
+            app.selected_label()
+                .map(clean)
+                .unwrap_or_else(|| "-".into())
+        ));
     }
     let mut toggles = String::new();
     toggles.push_str(match app.mode() {
@@ -988,8 +1153,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         .map(|n| format!("  {n}"))
         .unwrap_or_default();
     let right = format!("{toggles}{count}  ? help ");
+    // Display width, not byte length: the status glyphs are multi-byte.
     let pad = (area.width as usize)
-        .saturating_sub(left.len() + message.len() + right.len())
+        .saturating_sub(
+            wrap::display_width(&left)
+                + wrap::display_width(&message)
+                + wrap::display_width(&right),
+        )
         .max(1);
     let line = Line::from(vec![
         Span::styled(left, style),
@@ -1096,6 +1266,74 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The target picker: one row per target in stack order, the cursor row
+/// highlighted, modelled on the help overlay.
+fn draw_target_picker(frame: &mut Frame, app: &App, area: Rect, cursor: usize) {
+    let theme = app.theme();
+    let rows = app.targets().len() as u16;
+    let popup = centered(area, 78, (rows + 4).clamp(5, area.height.saturating_sub(2)));
+    frame.render_widget(Clear, popup);
+    let title = match app.trunk() {
+        Some(trunk) => format!(" targets (trunk {}) ", clean(trunk)),
+        None => " targets ".to_string(),
+    };
+    let block = Block::default()
+        .title(title)
+        .title_bottom(" enter selects \u{b7} esc closes \u{b7} ( ) step without the picker ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.comment_border))
+        .style(Style::default().bg(theme.overlay_bg).fg(theme.fg));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let visible = inner.height as usize;
+    let scroll = cursor.saturating_sub(visible.saturating_sub(1));
+    let mut lines = Vec::new();
+    for (index, target) in app.targets().iter().enumerate().skip(scroll).take(visible) {
+        let counts = app.target_counts(&target.id);
+        let base = if index == cursor {
+            Style::default()
+                .bg(theme.tree_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let position = target.position.map(|p| p.to_string()).unwrap_or_default();
+        let oid = target
+            .tip
+            .as_deref()
+            .map(|t| t.get(..8).unwrap_or(t))
+            .unwrap_or("");
+        let label = clean(&target.label);
+        let mut spans = vec![
+            Span::styled(format!(" {position:>2} "), base.fg(theme.hunk_fg)),
+            Span::styled(format!("{label:<18} "), base.fg(theme.fg)),
+            Span::styled(format!("{oid:<8} "), base.fg(theme.dim)),
+            Span::styled(format!("{:>3}c ", target.commit_count), base.fg(theme.dim)),
+            Span::styled(
+                format!("\u{25cb}{}/{} ", counts.todo, counts.total),
+                base.fg(if counts.todo > 0 {
+                    theme.open_fg
+                } else {
+                    theme.dim
+                }),
+            ),
+        ];
+        if let Some(subject) = &target.subject {
+            spans.push(Span::styled(clean(subject), base.fg(theme.fg)));
+        }
+        if !target.aliases.is_empty() {
+            spans.push(Span::styled(
+                format!("  (also: {})", clean(&target.aliases.join(", "))),
+                base.fg(theme.dim),
+            ));
+        }
+        pad_line(&mut spans, inner.width as usize, theme.overlay_bg);
+        lines.push(Line::from(spans).style(base));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     let Overlay::Editor(state) = app.overlay() else {
         return;
@@ -1194,6 +1432,7 @@ mod tests {
         (
             LayoutInputs {
                 show_tree,
+                show_strip: false,
                 line_numbers: true,
                 mode,
                 tree_cursor: 0,
@@ -1259,7 +1498,12 @@ mod tests {
             "t",
         );
         store.init(&review).expect("init");
-        let mut app = super::super::app::App::open(store, false, false).expect("open");
+        let mut app = super::super::app::App::open(
+            crate::application::Application::open(store),
+            false,
+            false,
+        )
+        .expect("open");
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1275,6 +1519,143 @@ mod tests {
             content.contains("review r"),
             "banner should show the review name; got: {content}"
         );
+        let first_row: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(
+            first_row.contains("review r"),
+            "a plain review has no target strip: the banner is the first row; got {first_row:?}"
+        );
+        assert!(app.last_layout_strip().is_none());
+    }
+
+    #[test]
+    fn layout_reserves_the_strip_row_and_hit_maps_it() {
+        let (mut inp, area) = inputs(true, ViewMode::Unified, 100);
+        inp.show_strip = true;
+        let l = layout(&inp, area);
+        let strip = l.strip.expect("strip row");
+        assert_eq!(strip.y, 0);
+        assert_eq!(strip.height, 1);
+        assert_eq!(l.diff.y, 1, "the body starts under the strip");
+        assert_eq!(l.hit(7, 0), Hit::Strip { col: 7 });
+        assert!(matches!(l.hit(2, 1), Hit::Tree(_)));
+        assert_eq!(
+            l.status.y,
+            area.height - 1,
+            "the status bar keeps the bottom row"
+        );
+
+        inp.show_strip = false;
+        let l = layout(&inp, area);
+        assert!(l.strip.is_none());
+        assert!(matches!(l.hit(7, 0), Hit::Tree(_)));
+    }
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// A stack review over a scratch repo: `main`, then PR branches
+    /// `auth-1` and `\u{4e00}\u{4e8c}` (a CJK name, two cells per char) so
+    /// the strip's spans are measured in display width, not bytes.
+    fn stack_app() -> (tempfile::TempDir, super::super::app::App) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write");
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["checkout", "-q", "-b", "auth-1"]);
+        std::fs::write(root.join("a.txt"), "alpha\n").expect("write");
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "Add login form"]);
+        git(root, &["checkout", "-q", "-b", "\u{4e00}\u{4e8c}"]);
+        std::fs::write(root.join("b.txt"), "bravo\n").expect("write");
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "Wire the session cookie"]);
+        let store = ambidiff_core::store::Store::new(root);
+        let review = ambidiff_core::review::ReviewFile::new(
+            "s".into(),
+            ambidiff_core::review::Source::git_stack(Some("main".into())),
+            "t",
+        );
+        store.init(&review).expect("init");
+        let app = super::super::app::App::open(
+            crate::application::Application::open(store),
+            false,
+            false,
+        )
+        .expect("open");
+        (dir, app)
+    }
+
+    #[test]
+    fn strip_cells_are_measured_in_display_width_and_hit_tested_the_same_way() {
+        let (_dir, app) = stack_app();
+        assert!(app.is_stack());
+        let cells = strip_cells(&app, 100);
+        let labels: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![" 1 auth-1 ", "[2 \u{4e00}\u{4e8c}]", " stack "],
+            "positions prefix PRs, the topmost PR opens selected"
+        );
+        for cell in &cells {
+            assert_eq!(cell.x1 - cell.x0, wrap::display_width(&cell.text));
+        }
+        // The CJK label is 4 bytes per char but 2 cells: the next cell
+        // starts where the painted text ends, not where the bytes end.
+        assert_eq!(cells[1].x1 - cells[1].x0, 8, "[2 ] plus two 2-cell glyphs");
+        assert_eq!(cells[2].x0, cells[1].x1 + 1);
+        assert_eq!(strip_cell_at(&app, 100, 0), Some(0));
+        assert_eq!(strip_cell_at(&app, 100, cells[1].x0), Some(1));
+        assert_eq!(strip_cell_at(&app, 100, cells[2].x0 + 2), Some(2));
+        assert_eq!(
+            strip_cell_at(&app, 100, cells[1].x1),
+            None,
+            "the gap column"
+        );
+        assert_eq!(strip_cell_at(&app, 100, 99), None);
+        // A narrow strip drops whole trailing cells rather than clipping.
+        let narrow = strip_cells(&app, 19);
+        assert_eq!(narrow.len(), 2, "{narrow:?}");
+    }
+
+    #[test]
+    fn draw_paints_the_strip_on_the_first_row_for_a_stack_review() {
+        let (_dir, mut app) = stack_app();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = terminal.backend().buffer();
+        // A wide glyph owns two cells; the backend reports the second as a
+        // blank symbol, so match the pieces rather than the joined string.
+        let first_row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(first_row.contains("1 auth-1"), "{first_row:?}");
+        assert!(first_row.contains("[2 \u{4e00}"), "{first_row:?}");
+        assert!(first_row.contains("\u{4e8c}"), "{first_row:?}");
+        assert!(first_row.contains("stack"), "{first_row:?}");
+        assert!(!first_row.contains("worktree"), "clean tree: {first_row:?}");
+        assert!(
+            first_row.trim_end().ends_with("Wire the session cookie"),
+            "selected subject is right-aligned: {first_row:?}"
+        );
+        let last_row: String = (0..80).map(|x| buf[(x, 23)].symbol()).collect();
+        assert!(
+            last_row.contains("target:\u{4e00}"),
+            "status bar names the target: {last_row:?}"
+        );
+        assert_eq!(app.last_layout_strip().map(|r| r.y), Some(0));
     }
 
     /// The one assertion nothing else can make: every body row of a wrapped
@@ -1309,7 +1690,12 @@ mod tests {
             extra: Default::default(),
         });
         store.init(&review).expect("init");
-        let mut app = super::super::app::App::open(store, false, false).expect("open");
+        let mut app = super::super::app::App::open(
+            crate::application::Application::open(store),
+            false,
+            false,
+        )
+        .expect("open");
         app.toggle_wrap();
 
         let backend = TestBackend::new(50, 24);
