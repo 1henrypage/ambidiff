@@ -38,6 +38,22 @@ fn config(root: &Path) -> WatchConfig {
     config
 }
 
+/// Start a controller whose OS watch is REALLY armed before the test
+/// generates events. `start_checked` bounds its own wait at two seconds
+/// (a production caller must not hang), and under load FSEvents
+/// registration can take longer than that: a test that wrote before the
+/// watch existed lost the event and, with the safety poll parked, timed
+/// out with no explanation. Waiting here turns that into a precise
+/// failure and keeps the assertions about the event-driven path honest.
+fn armed(config: WatchConfig, diff_sig: SignatureFn, review_sig: SignatureFn) -> WatchController {
+    let controller = WatchController::start_checked(config, diff_sig, review_sig);
+    match controller.wait_armed(Duration::from_secs(30)) {
+        Some(true) => controller,
+        Some(false) => panic!("the OS watch degraded to polling; this test needs real events"),
+        None => panic!("the OS watch was not registered within 30s"),
+    }
+}
+
 fn wait_for(controller: &WatchController, want: Refresh, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -65,7 +81,7 @@ fn real_change_triggers_diff_refresh_and_touch_does_not() {
     std::fs::write(&data, "v1").expect("write");
 
     let sig_path = data.clone();
-    let controller = WatchController::start_checked(
+    let controller = armed(
         config(root),
         checked(move || file_sig(&sig_path)),
         checked(|| 0),
@@ -98,7 +114,7 @@ fn burst_of_events_coalesces_into_one_refresh() {
     // here: the previous flakiness under heavy parallel load came from
     // generating events before that registration had necessarily happened,
     // not from insufficient sleep duration.
-    let controller = WatchController::start_checked(
+    let controller = armed(
         config(root),
         checked(move || file_sig(&sig_path)),
         checked(|| 0),
@@ -133,7 +149,7 @@ fn review_file_change_classifies_as_review_refresh() {
     // See `burst_of_events_coalesces_into_one_refresh`: `start` already
     // guarantees the watcher has attempted registration before returning,
     // so no arm-up sleep is needed.
-    let controller = WatchController::start_checked(
+    let controller = armed(
         config(root),
         checked(|| 0),
         checked(move || file_sig(&sig_path)),
@@ -218,7 +234,7 @@ fn set_diff_signature_swaps_source_and_rebaselines() {
     std::fs::write(&b, "b1").expect("write b");
 
     let sig_a = a.clone();
-    let controller = WatchController::start_checked(
+    let controller = armed(
         config(root),
         checked(move || file_sig(&sig_a)),
         checked(|| 0),
@@ -249,7 +265,7 @@ fn sidecar_churn_does_not_trigger_diff() {
     let root = dir.path();
     let counter = Arc::new(AtomicU64::new(0));
     let c = Arc::clone(&counter);
-    let controller = WatchController::start_checked(
+    let controller = armed(
         config(root),
         checked(move || c.fetch_add(1, Ordering::Relaxed)),
         checked(|| 0),
@@ -268,7 +284,7 @@ fn sidecar_churn_does_not_trigger_diff() {
 fn stop_joins_thread() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
-    let controller = WatchController::start_checked(config(root), checked(|| 0), checked(|| 0));
+    let controller = armed(config(root), checked(|| 0), checked(|| 0));
     std::thread::sleep(Duration::from_millis(100));
     // Must return promptly (the background thread actually joins) rather
     // than hang; a hang fails this test via the harness timeout.
@@ -339,7 +355,7 @@ fn absent_review_file_is_a_stable_signature_and_creation_fires_review() {
     let path = review_path.clone();
     let review_sig: SignatureFn = Arc::new(move || review_file_signature(&path));
     let diff_sig = checked(|| 1);
-    let controller = WatchController::start_checked(config(root), diff_sig, review_sig);
+    let controller = armed(config(root), diff_sig, review_sig);
     assert_quiet(&controller, Duration::from_millis(300));
 
     std::fs::write(&review_path, "{\"ambidiff\":1}").expect("create review");
