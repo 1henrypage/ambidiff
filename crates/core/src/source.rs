@@ -96,6 +96,15 @@ impl std::fmt::Display for Comparison {
     }
 }
 
+/// The reviewed commit of a single-commit review, for the banner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitSummary {
+    pub oid: String,
+    /// First line of the commit message (display only).
+    pub subject: String,
+}
+
 /// How a review chooses what to compare, as recorded in the review file's
 /// `source` (or given on the command line for an unsaved review).
 #[derive(Debug, Clone, PartialEq, Eq)]

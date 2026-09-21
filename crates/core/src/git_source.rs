@@ -9,10 +9,18 @@
 //! populate regardless of user config. A numstat preflight, plus a raw-byte
 //! budget on the patch text itself, skips diffs that would swamp the
 //! viewer. The comparison (which two endpoints a diff is taken between) is
-//! resolved once per [`GitSource::open`] and cached; [`GitSource::try_signature`]
+//! resolved once per [`GitSource::open_with`] and cached; [`GitSource::try_signature`]
 //! re-resolves independently, without disturbing that cache, so watch
 //! polling reacts to a moved `HEAD` even though the open session's own view
 //! stays stable for its lifetime.
+//!
+//! Three comparison modes share this one resolver ([`CompareSpec`]): the
+//! working tree or index against a base, one commit against its first
+//! parent, and a stack of PR branches above trunk. Stack discovery is a
+//! fixed set of plumbing calls (trunk, `HEAD`, merge-base, the first-parent
+//! chain with subjects, local branch tips, the checked-out branch, and
+//! whether the tree is dirty) whose facts `stack::assemble_stack` turns into
+//! targets; the policy never lives here.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -28,9 +36,10 @@ use crate::parser::parse_file_diff;
 use crate::review::Side;
 use crate::rootio::{self, ReviewRoot, RootError};
 use crate::source::{
-    Comparison, DiffSource, Endpoint, FileDiffRequest, Listing, SkipReason, SkippedPath,
-    SourceError,
+    CommitSummary, CompareSpec, Comparison, DiffSource, Endpoint, FileDiffRequest, Listing,
+    SkipReason, SkippedPath, SourceError, SourceMode,
 };
+use crate::stack::{ChainCommit, Stack, StackInput, TargetId, assemble_stack};
 
 /// Size and time budgets a [`GitSource`] enforces so one file, one signature
 /// pass, or one hung git process cannot swamp the viewer.
@@ -72,7 +81,29 @@ struct Resolved {
     /// `--relative` listings and diff pathspecs are already root-relative
     /// because `cwd = root`.
     prefix: String,
+    spec: ResolvedSpec,
+}
+
+/// What resolving a [`CompareSpec`] yields: the comparison to diff, plus
+/// the stack and selected target (stack mode) or the commit banner (commit
+/// mode).
+#[derive(Debug, Clone)]
+struct ResolvedSpec {
     comparison: Comparison,
+    stack: Option<Stack>,
+    selected: Option<TargetId>,
+    commit: Option<CommitSummary>,
+}
+
+impl ResolvedSpec {
+    fn plain(comparison: Comparison) -> ResolvedSpec {
+        ResolvedSpec {
+            comparison,
+            stack: None,
+            selected: None,
+            commit: None,
+        }
+    }
 }
 
 static DEFAULT_COMPARISON: LazyLock<Comparison> = LazyLock::new(|| Comparison {
@@ -84,40 +115,97 @@ static DEFAULT_COMPARISON: LazyLock<Comparison> = LazyLock::new(|| Comparison {
 #[derive(Debug, Clone)]
 pub struct GitSource {
     root: PathBuf,
-    /// The comparison spec as given: `None` diffs the working tree against
-    /// the index; `Some("REF")` diffs the working tree against REF;
-    /// `Some("A..B")` / `Some("A...B")` diff ranges.
-    base: Option<String>,
-    staged: bool,
+    /// What to compare, as given (and, for a stack, which target this
+    /// process selected).
+    spec: CompareSpec,
     limits: SourceLimits,
     git: PathBuf,
     resolved: Arc<OnceLock<Resolved>>,
 }
 
 impl GitSource {
-    /// Open a git-backed source, resolving the comparison and repo prefix
-    /// now (a bad ref, an orphan `...` range, or a non-repository root all
-    /// surface here rather than on first use).
+    /// Open a git-backed source for a working-tree comparison: `None`
+    /// diffs the working tree against the index; `Some("REF")` diffs the
+    /// working tree against REF; `Some("A..B")` / `Some("A...B")` diff
+    /// ranges; `staged` swaps the working tree for the index. A thin
+    /// wrapper over [`GitSource::open_with`].
     pub fn open(
         root: impl Into<PathBuf>,
         base: Option<String>,
         staged: bool,
     ) -> Result<GitSource, SourceError> {
+        GitSource::open_with(root, CompareSpec::worktree(base, staged))
+    }
+
+    /// Open a git-backed source, resolving the comparison and repo prefix
+    /// now (a bad ref, an orphan `...` range, a missing trunk, a target
+    /// that is not in the stack, or a non-repository root all surface here
+    /// rather than on first use).
+    pub fn open_with(
+        root: impl Into<PathBuf>,
+        spec: CompareSpec,
+    ) -> Result<GitSource, SourceError> {
         let root = root.into();
-        let base = base.filter(|b| !b.is_empty());
         let git = PathBuf::from("git");
         let limits = SourceLimits::default();
-        let resolved = resolve_now(&root, &git, &base, staged, limits.git_deadline)?;
+        let resolved = resolve_now(&root, &git, &spec, limits.git_deadline)?;
         let cell = OnceLock::new();
         let _ = cell.set(resolved);
         Ok(GitSource {
             root,
-            base,
-            staged,
+            spec,
             limits,
             git,
             resolved: Arc::new(cell),
         })
+    }
+
+    pub fn spec(&self) -> &CompareSpec {
+        &self.spec
+    }
+
+    /// The discovered stack (stack mode only).
+    pub fn stack(&self) -> Option<&Stack> {
+        self.resolved().ok().and_then(|r| r.spec.stack.as_ref())
+    }
+
+    /// The target this source was opened for (stack mode only): the
+    /// requested one, or the stack's default when none was requested.
+    pub fn selected_target(&self) -> Option<&TargetId> {
+        self.resolved().ok().and_then(|r| r.spec.selected.as_ref())
+    }
+
+    /// The reviewed commit's oid and subject (commit mode only).
+    pub fn commit_summary(&self) -> Option<&CommitSummary> {
+        self.resolved().ok().and_then(|r| r.spec.commit.as_ref())
+    }
+
+    /// Discover the stack at `root` without opening a source: for `init`
+    /// preflight and `status`. `upstream` overrides trunk auto-detection.
+    pub fn discover_stack(root: &Path, upstream: Option<&str>) -> Result<Stack, SourceError> {
+        let git = Path::new("git");
+        if !is_repo_with(git, root) {
+            return Err(SourceError::NotARepo {
+                root: root.display().to_string(),
+            });
+        }
+        discover(root, git, upstream, SourceLimits::default().git_deadline)
+    }
+
+    /// The working tree's top-level directory containing `start`, or
+    /// `None` outside a working tree. The review root of an unsaved
+    /// (`--commit` / `--stack` without a review file) session.
+    pub fn toplevel(start: &Path) -> Option<PathBuf> {
+        let out = run_capture_ok(
+            Path::new("git"),
+            start,
+            &["rev-parse", "--show-toplevel"],
+            Duration::from_secs(10),
+            None,
+        )
+        .ok()?;
+        let top = out.trim_end_matches(['\n', '\r']);
+        (!top.is_empty()).then(|| PathBuf::from(top))
     }
 
     pub fn with_limits(mut self, limits: SourceLimits) -> GitSource {
@@ -145,13 +233,7 @@ impl GitSource {
         if let Some(r) = self.resolved.get() {
             return Ok(r);
         }
-        let r = resolve_now(
-            &self.root,
-            &self.git,
-            &self.base,
-            self.staged,
-            self.limits.git_deadline,
-        )?;
+        let r = resolve_now(&self.root, &self.git, &self.spec, self.limits.git_deadline)?;
         let _ = self.resolved.set(r);
         Ok(self
             .resolved
@@ -164,7 +246,7 @@ impl GitSource {
     /// `index..worktree` comparison rather than panicking.
     pub fn comparison(&self) -> &Comparison {
         self.resolved()
-            .map(|r| &r.comparison)
+            .map(|r| &r.spec.comparison)
             .unwrap_or(&DEFAULT_COMPARISON)
     }
 
@@ -380,7 +462,7 @@ impl GitSource {
     }
 
     fn read_side_impl(&self, side: Side, path: &str) -> Result<Option<String>, SourceError> {
-        let endpoint = self.resolved()?.comparison.endpoint(side).clone();
+        let endpoint = self.resolved()?.spec.comparison.endpoint(side).clone();
         let mut buf = Vec::new();
         let found = self.stream_side(&endpoint, path, self.limits.raw_bytes, |chunk| {
             buf.extend_from_slice(chunk);
@@ -415,7 +497,7 @@ impl GitSource {
     /// (including the object being too large to bother counting) yields
     /// `None` rather than failing the surrounding diff.
     fn old_total_lines(&self, req: &FileDiffRequest) -> Option<u32> {
-        let endpoint = self.resolved().ok()?.comparison.old.clone();
+        let endpoint = self.resolved().ok()?.spec.comparison.old.clone();
         let path = req.path_on(Side::Old);
         let mut counter = LineCounter::default();
         let found = self
@@ -484,7 +566,7 @@ impl GitSource {
     }
 
     fn listing_impl(&self) -> Result<Listing, SourceError> {
-        let comparison = self.resolved()?.comparison.clone();
+        let comparison = self.resolved()?.spec.comparison.clone();
 
         let mut ns_args = self.diff_prefix_args();
         ns_args.extend(endpoint_args(&comparison));
@@ -584,7 +666,7 @@ impl GitSource {
     /// plus a raw-byte budget on the patch text itself (a single enormous
     /// line has few "lines" by the preflight's count but many bytes).
     pub fn file_diff_raw(&self, req: &FileDiffRequest) -> Result<RawDiff, SourceError> {
-        let comparison = self.resolved()?.comparison.clone();
+        let comparison = self.resolved()?.spec.comparison.clone();
 
         if comparison.new_is_worktree() && !self.is_tracked(&req.path)? {
             let root = self.root_reader()?;
@@ -683,14 +765,15 @@ impl GitSource {
     /// re-runs this after filesystem events and refreshes only when it
     /// moves (the gate against touch-without-change noise).
     pub fn try_signature(&self) -> Result<u64, SourceError> {
-        let comparison = resolve_comparison(
-            &self.root,
-            &self.git,
-            &self.base,
-            self.staged,
-            self.limits.git_deadline,
-        )?;
+        let resolved = resolve_spec(&self.root, &self.git, &self.spec, self.limits.git_deadline)?;
+        let comparison = resolved.comparison;
         let mut hasher = Fnv1a::new();
+        if let Some(stack) = &resolved.stack {
+            // A PR added, merged away, re-tipped, or the tree turning dirty
+            // changes the strip even when the selected diff is identical.
+            hasher.feed(b"shape\0");
+            hasher.feed(stack.shape_key().as_bytes());
+        }
         hasher.feed(b"cmp\0");
         hasher.feed(comparison.to_string().as_bytes());
 
@@ -904,8 +987,7 @@ fn endpoint_oid(e: &Endpoint) -> String {
 fn resolve_now(
     root: &Path,
     git: &Path,
-    base: &Option<String>,
-    staged: bool,
+    spec: &CompareSpec,
     deadline: Duration,
 ) -> Result<Resolved, SourceError> {
     if !is_repo_with(git, root) {
@@ -916,8 +998,238 @@ fn resolve_now(
     let prefix = run_capture_ok(git, root, &["rev-parse", "--show-prefix"], deadline, None)?
         .trim()
         .to_string();
-    let comparison = resolve_comparison(root, git, base, staged, deadline)?;
-    Ok(Resolved { prefix, comparison })
+    let spec = resolve_spec(root, git, spec, deadline)?;
+    Ok(Resolved { prefix, spec })
+}
+
+fn resolve_spec(
+    root: &Path,
+    git: &Path,
+    spec: &CompareSpec,
+    deadline: Duration,
+) -> Result<ResolvedSpec, SourceError> {
+    match &spec.mode {
+        SourceMode::Worktree { base, staged } => Ok(ResolvedSpec::plain(resolve_comparison(
+            root, git, base, *staged, deadline,
+        )?)),
+        SourceMode::Commit { spec } => {
+            let oid = resolve_ref(root, git, spec, deadline)?;
+            // A root commit has no first parent: its diff is against the
+            // empty tree, exactly as `git show` renders it.
+            let old = match resolve_ref(root, git, &format!("{oid}^1"), deadline) {
+                Ok(parent) => Endpoint::Commit { oid: parent },
+                Err(SourceError::InvalidRef { .. }) => Endpoint::EmptyTree {
+                    oid: empty_tree_oid(root, git, deadline)?,
+                },
+                Err(e) => return Err(e),
+            };
+            let subject = commit_subject(root, git, &oid, deadline)?;
+            Ok(ResolvedSpec {
+                comparison: Comparison {
+                    old,
+                    new: Endpoint::Commit { oid: oid.clone() },
+                },
+                stack: None,
+                selected: None,
+                commit: Some(CommitSummary { oid, subject }),
+            })
+        }
+        SourceMode::Stack { upstream } => {
+            let stack = discover(root, git, upstream.as_deref(), deadline)?;
+            let selected = match &spec.target {
+                Some(target) => {
+                    if stack.find(target).is_none() {
+                        return Err(SourceError::TargetNotInStack {
+                            target: target.label().to_string(),
+                        });
+                    }
+                    target.clone()
+                }
+                None => stack
+                    .default_target()
+                    .ok_or_else(|| SourceError::EmptyStack {
+                        trunk: stack.trunk.clone(),
+                    })?,
+            };
+            let comparison = stack
+                .find(&selected)
+                .map(|t| t.comparison.clone())
+                .unwrap_or_else(|| unreachable_resolved().spec.comparison.clone());
+            Ok(ResolvedSpec {
+                comparison,
+                stack: Some(stack),
+                selected: Some(selected),
+                commit: None,
+            })
+        }
+    }
+}
+
+fn commit_subject(
+    root: &Path,
+    git: &Path,
+    oid: &str,
+    deadline: Duration,
+) -> Result<String, SourceError> {
+    let out = run_capture_ok(
+        git,
+        root,
+        &["log", "-1", "--format=%s", "--end-of-options", oid],
+        deadline,
+        None,
+    )?;
+    Ok(out.trim_end_matches(['\n', '\r']).to_string())
+}
+
+// ---------------------------------------------------------------------
+// Stack discovery
+// ---------------------------------------------------------------------
+
+/// Trunk candidates in order when `--upstream` is not given: the remote's
+/// default branch, then the conventional names on the remote, then locally.
+const TRUNK_CANDIDATES: [&str; 4] = [
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/heads/main",
+    "refs/heads/master",
+];
+
+/// The trunk's name and commit oid. An explicit upstream must verify; the
+/// auto-detected one is the first verifying candidate (a dangling
+/// `origin/HEAD` is skipped, not fatal).
+fn resolve_trunk(
+    root: &Path,
+    git: &Path,
+    upstream: Option<&str>,
+    deadline: Duration,
+) -> Result<(String, String), SourceError> {
+    if let Some(upstream) = upstream {
+        let oid = resolve_ref(root, git, upstream, deadline)?;
+        return Ok((upstream.to_string(), oid));
+    }
+    let mut tried = Vec::new();
+    match run_capture_ok(
+        git,
+        root,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        deadline,
+        None,
+    ) {
+        Ok(out) => {
+            let name = out.trim().to_string();
+            if !name.is_empty() {
+                if let Ok(oid) = resolve_ref(root, git, &name, deadline) {
+                    return Ok((name, oid));
+                }
+                tried.push(name);
+            }
+        }
+        Err(_) => tried.push("refs/remotes/origin/HEAD".to_string()),
+    }
+    for candidate in TRUNK_CANDIDATES {
+        if let Ok(oid) = resolve_ref(root, git, candidate, deadline) {
+            return Ok((candidate.to_string(), oid));
+        }
+        tried.push(candidate.to_string());
+    }
+    Err(SourceError::NoTrunk { tried })
+}
+
+/// Collect the stack facts and assemble them. Every call goes through the
+/// hardened runner with `cwd = root`.
+fn discover(
+    root: &Path,
+    git: &Path,
+    upstream: Option<&str>,
+    deadline: Duration,
+) -> Result<Stack, SourceError> {
+    let (trunk, trunk_oid) = resolve_trunk(root, git, upstream, deadline)?;
+    let head = match resolve_ref(root, git, "HEAD", deadline) {
+        Ok(oid) => oid,
+        Err(SourceError::InvalidRef { .. }) => return Err(SourceError::UnbornHead),
+        Err(e) => return Err(e),
+    };
+    let base = merge_base(root, git, &trunk_oid, &head, deadline).map_err(|_| {
+        SourceError::NoMergeBase {
+            left: trunk.clone(),
+            right: "HEAD".to_string(),
+        }
+    })?;
+
+    // `-z` with a tformat: every record is `<oid>NUL<subject>NUL`.
+    let range = format!("{base}..{head}");
+    let log = run_capture_ok(
+        git,
+        root,
+        &[
+            "log",
+            "--reverse",
+            "--first-parent",
+            "-z",
+            "--format=%H%x00%s",
+            "--end-of-options",
+            &range,
+        ],
+        deadline,
+        None,
+    )?;
+    let mut fields = log.split('\0');
+    let mut chain = Vec::new();
+    while let Some(oid) = fields.next() {
+        if oid.is_empty() {
+            continue;
+        }
+        let subject = fields.next().unwrap_or_default();
+        chain.push(ChainCommit {
+            oid: oid.to_string(),
+            subject: subject.to_string(),
+        });
+    }
+
+    // `lstrip=2`, not `:short`: the short form prints `heads/x` when a tag
+    // shadows the branch, which would never match the checked-out name.
+    let refs = run_capture_ok(
+        git,
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname:lstrip=2)",
+            "refs/heads/",
+        ],
+        deadline,
+        None,
+    )?;
+    let branches: Vec<(String, String)> = refs
+        .lines()
+        .filter_map(|line| {
+            let (oid, name) = line.split_once('\0')?;
+            (!oid.is_empty() && !name.is_empty()).then(|| (oid.to_string(), name.to_string()))
+        })
+        .collect();
+
+    // Non-zero means a detached HEAD.
+    let current_branch = run_capture_ok(git, root, &["symbolic-ref", "-q", "HEAD"], deadline, None)
+        .ok()
+        .and_then(|out| out.trim().strip_prefix("refs/heads/").map(str::to_string));
+
+    let status = run_capture_ok(
+        git,
+        root,
+        &["status", "--porcelain", "-z", "--untracked-files=normal"],
+        deadline,
+        None,
+    )?;
+    let dirty = !status.is_empty();
+
+    Ok(assemble_stack(StackInput {
+        trunk,
+        base,
+        head,
+        chain,
+        branches,
+        current_branch,
+        dirty,
+    }))
 }
 
 fn resolve_comparison(
@@ -1047,20 +1359,24 @@ fn resolve_head_or_empty_tree(
 ) -> Result<Endpoint, SourceError> {
     match resolve_ref(root, git, "HEAD", deadline) {
         Ok(oid) => Ok(Endpoint::Commit { oid }),
-        Err(SourceError::InvalidRef { .. }) => {
-            let out = run_capture_ok(
-                git,
-                root,
-                &["hash-object", "-t", "tree", "--stdin"],
-                deadline,
-                Some(&[]),
-            )?;
-            Ok(Endpoint::EmptyTree {
-                oid: out.trim().to_string(),
-            })
-        }
+        Err(SourceError::InvalidRef { .. }) => Ok(Endpoint::EmptyTree {
+            oid: empty_tree_oid(root, git, deadline)?,
+        }),
         Err(e) => Err(e),
     }
+}
+
+/// The well-known empty tree, asked of this repository's object format
+/// rather than hard-coded (SHA-256 repositories have a different one).
+fn empty_tree_oid(root: &Path, git: &Path, deadline: Duration) -> Result<String, SourceError> {
+    let out = run_capture_ok(
+        git,
+        root,
+        &["hash-object", "-t", "tree", "--stdin"],
+        deadline,
+        Some(&[]),
+    )?;
+    Ok(out.trim().to_string())
 }
 
 fn is_repo_with(git: &Path, root: &Path) -> bool {
@@ -1087,10 +1403,10 @@ fn unreachable_resolved() -> &'static Resolved {
     // and `get()` still returns `Some`.
     static FALLBACK: LazyLock<Resolved> = LazyLock::new(|| Resolved {
         prefix: String::new(),
-        comparison: Comparison {
+        spec: ResolvedSpec::plain(Comparison {
             old: Endpoint::Index,
             new: Endpoint::Worktree,
-        },
+        }),
     });
     &FALLBACK
 }

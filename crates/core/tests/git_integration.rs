@@ -846,3 +846,582 @@ fn staged_with_a_base_ref_compares_the_ref_with_the_index() {
         "staged + range is refused: {err}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Commit mode and stacks
+// ---------------------------------------------------------------------
+
+use ambidiff_core::source::CompareSpec;
+use ambidiff_core::stack::TargetId;
+
+fn git_env(root: &Path, env: &[(&str, &str)], args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .envs(env.iter().copied())
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn git_out(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn oid_of(root: &Path, rev: &str) -> String {
+    git_out(root, &["rev-parse", "--verify", rev])
+}
+
+fn branch(name: &str) -> TargetId {
+    TargetId::Branch {
+        name: name.to_string(),
+    }
+}
+
+/// A bare `origin` for `root`, with `main` pushed and `origin/HEAD`
+/// pointing at it (the shape a cloned work repo has).
+fn bare_origin(root: &Path) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    git(dir.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            dir.path().to_str().expect("utf8"),
+        ],
+    );
+    git(root, &["push", "-q", "origin", "main"]);
+    git(root, &["remote", "set-head", "origin", "main"]);
+    dir
+}
+
+/// The Databricks shape: `main` (base), PR `auth-1` adding `src/a.txt`,
+/// PR `auth-2` on top adding `src/b.txt`, `auth-2` checked out.
+fn stack_repo() -> (tempfile::TempDir, PathBuf) {
+    let (dir, root) = repo(&[("README.md", "# base\n")]);
+    git(&root, &["checkout", "-q", "-b", "auth-1"]);
+    write(&root, "src/a.txt", "alpha one\nalpha two\nalpha three\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "Add login form"]);
+    git(&root, &["checkout", "-q", "-b", "auth-2"]);
+    write(&root, "src/b.txt", "bravo one\nbravo two\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "Wire the session cookie"]);
+    (dir, root)
+}
+
+fn stack_of(root: &Path) -> ambidiff_core::stack::Stack {
+    GitSource::discover_stack(root, Some("main")).expect("discover")
+}
+
+#[test]
+fn commit_mode_diffs_the_first_parent_against_the_commit() {
+    let (_dir, root) = repo(&[("f.txt", "v1\n")]);
+    write(&root, "f.txt", "v2\n");
+    git(&root, &["commit", "-qam", "second"]);
+    write(&root, "f.txt", "dirty\n");
+
+    let source = GitSource::open_with(&root, CompareSpec::commit("HEAD")).expect("open");
+    let cmp = source.comparison();
+    assert_eq!(
+        cmp.old,
+        Endpoint::Commit {
+            oid: oid_of(&root, "HEAD~1")
+        }
+    );
+    assert_eq!(
+        cmp.new,
+        Endpoint::Commit {
+            oid: oid_of(&root, "HEAD")
+        }
+    );
+    let summary = source.commit_summary().expect("commit summary");
+    assert_eq!(summary.oid, oid_of(&root, "HEAD"));
+    assert_eq!(summary.subject, "second");
+    assert!(source.stack().is_none());
+    assert!(source.selected_target().is_none());
+
+    let entries = source.listing().expect("files").entries;
+    let diff = source
+        .file_diff(&FileDiffRequest::for_entry(&entries[0], 3))
+        .expect("diff");
+    let adds: Vec<&str> = diff.hunks[0]
+        .lines
+        .iter()
+        .filter(|l| l.kind == LineKind::Add)
+        .map(|l| l.content.as_str())
+        .collect();
+    assert_eq!(adds, vec!["v2"], "the working tree does not leak in");
+}
+
+#[test]
+fn commit_mode_root_commit_diffs_against_the_empty_tree_and_bad_refs_fail() {
+    let (_dir, root) = repo(&[("f.txt", "v1\n")]);
+    let source = GitSource::open_with(&root, CompareSpec::commit("HEAD")).expect("open");
+    assert!(
+        matches!(source.comparison().old, Endpoint::EmptyTree { .. }),
+        "{}",
+        source.comparison()
+    );
+    let entries = source.listing().expect("files").entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, FileStatus::Added);
+
+    let err = GitSource::open_with(&root, CompareSpec::commit("nope")).expect_err("bad ref");
+    assert!(matches!(err, SourceError::InvalidRef { .. }), "{err}");
+}
+
+#[test]
+fn discovery_finds_two_prs_the_stack_and_no_worktree_when_clean() {
+    let (_dir, root) = stack_repo();
+    let stack = stack_of(&root);
+    assert_eq!(stack.trunk, "main");
+    assert_eq!(stack.base, oid_of(&root, "main"));
+    assert_eq!(stack.head, oid_of(&root, "auth-2"));
+    assert_eq!(
+        stack.ids(),
+        vec![branch("auth-1"), branch("auth-2"), TargetId::Stack]
+    );
+    let first = stack.find(&branch("auth-1")).expect("auth-1");
+    assert_eq!(first.position, Some(1));
+    assert_eq!(first.tip.as_deref(), Some(oid_of(&root, "auth-1").as_str()));
+    assert_eq!(first.subject.as_deref(), Some("Add login form"));
+    assert_eq!(first.commit_count, 1);
+    let second = stack.find(&branch("auth-2")).expect("auth-2");
+    assert_eq!(
+        second.comparison.old,
+        Endpoint::Commit {
+            oid: oid_of(&root, "auth-1")
+        }
+    );
+    assert_eq!(
+        second.comparison.new,
+        Endpoint::Commit {
+            oid: oid_of(&root, "auth-2")
+        }
+    );
+    assert_eq!(second.subject.as_deref(), Some("Wire the session cookie"));
+
+    // `main` sits at the merge-base: not a PR.
+    assert!(stack.find(&branch("main")).is_none());
+
+    // Each PR lists exactly its own file.
+    let pr1 = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-1"))),
+    )
+    .expect("open pr1");
+    let paths: Vec<String> = pr1
+        .listing()
+        .expect("files")
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(paths, vec!["src/a.txt"]);
+    let pr2 = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-2"))),
+    )
+    .expect("open pr2");
+    let paths: Vec<String> = pr2
+        .listing()
+        .expect("files")
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(paths, vec!["src/b.txt"]);
+    let whole = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(TargetId::Stack)),
+    )
+    .expect("open stack");
+    let paths: Vec<String> = whole
+        .listing()
+        .expect("files")
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(paths, vec!["src/a.txt", "src/b.txt"]);
+}
+
+#[test]
+fn no_target_selects_the_topmost_pr_and_a_missing_target_errors() {
+    let (_dir, root) = stack_repo();
+    let source =
+        GitSource::open_with(&root, CompareSpec::stack(Some("main".into()), None)).expect("open");
+    assert_eq!(source.selected_target(), Some(&branch("auth-2")));
+    assert_eq!(
+        source.comparison().new,
+        Endpoint::Commit {
+            oid: oid_of(&root, "auth-2")
+        }
+    );
+    assert_eq!(source.stack().expect("stack").targets.len(), 3);
+
+    let err = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-9"))),
+    )
+    .expect_err("missing target");
+    assert!(matches!(err, SourceError::TargetNotInStack { .. }), "{err}");
+    assert!(err.to_string().contains("auth-9"));
+}
+
+#[test]
+fn trunk_detection_prefers_origin_head_then_falls_back_to_local_main() {
+    let (_dir, root) = stack_repo();
+    let local = stack_of(&root);
+    assert_eq!(local.trunk, "main");
+    let detected = GitSource::discover_stack(&root, None).expect("local main fallback");
+    assert_eq!(detected.trunk, "refs/heads/main");
+    assert_eq!(detected.ids(), local.ids());
+
+    let _origin = bare_origin(&root);
+    let with_origin = GitSource::discover_stack(&root, None).expect("origin/HEAD");
+    assert_eq!(with_origin.trunk, "refs/remotes/origin/main");
+    assert_eq!(with_origin.base, local.base);
+
+    // A dangling origin/HEAD is skipped, not fatal.
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gone",
+        ],
+    );
+    let skipped = GitSource::discover_stack(&root, None).expect("dangling origin/HEAD skipped");
+    assert_eq!(skipped.trunk, "refs/remotes/origin/main");
+
+    // --upstream wins over everything.
+    let explicit = GitSource::discover_stack(&root, Some("auth-1")).expect("explicit upstream");
+    assert_eq!(explicit.trunk, "auth-1");
+    assert_eq!(explicit.ids(), vec![branch("auth-2"), TargetId::Stack]);
+    let err = GitSource::discover_stack(&root, Some("no-such-ref")).expect_err("bad upstream");
+    assert!(matches!(err, SourceError::InvalidRef { .. }), "{err}");
+}
+
+#[test]
+fn no_trunk_names_the_candidates_and_the_upstream_flag() {
+    let (_dir, root) = repo(&[("f.txt", "x\n")]);
+    git(&root, &["branch", "-m", "main", "trunk"]);
+    let err = GitSource::discover_stack(&root, None).expect_err("no trunk");
+    let SourceError::NoTrunk { tried } = &err else {
+        panic!("expected NoTrunk, got {err}");
+    };
+    assert!(tried.contains(&"refs/heads/main".to_string()), "{tried:?}");
+    assert!(err.to_string().contains("--upstream"), "{err}");
+}
+
+#[test]
+fn a_fixup_rebase_with_update_refs_keeps_ids_and_moves_tips() {
+    let (_dir, root) = stack_repo();
+    let before = stack_of(&root);
+    let source = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-1"))),
+    )
+    .expect("open");
+    let sig_before = source.try_signature().expect("signature");
+
+    // Fold a fix into the bottom PR from the top of the stack.
+    write(
+        &root,
+        "src/a.txt",
+        "alpha one\nalpha two fixed\nalpha three\n",
+    );
+    git(&root, &["commit", "-qa", "--fixup", "auth-1"]);
+    git_env(
+        &root,
+        &[("GIT_SEQUENCE_EDITOR", "true")],
+        &[
+            "rebase",
+            "-q",
+            "-i",
+            "--autosquash",
+            "--update-refs",
+            "main",
+        ],
+    );
+
+    let after = stack_of(&root);
+    assert_eq!(after.ids(), before.ids(), "branch identity survives");
+    for name in ["auth-1", "auth-2"] {
+        assert_ne!(
+            after.find(&branch(name)).expect(name).tip,
+            before.find(&branch(name)).expect(name).tip,
+            "{name} was re-tipped"
+        );
+    }
+    assert_ne!(after.shape_key(), before.shape_key());
+    assert_ne!(source.try_signature().expect("signature"), sig_before);
+
+    // Re-resolving the bottom PR now shows the fix in its diff.
+    let reopened = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-1"))),
+    )
+    .expect("reopen");
+    let content = reopened
+        .read_side(Side::New, "src/a.txt")
+        .expect("read")
+        .expect("present");
+    assert!(content.contains("alpha two fixed"));
+}
+
+#[test]
+fn a_bottom_pr_fast_forwarded_into_trunk_drops_out_and_moves_the_signature() {
+    let (_dir, root) = stack_repo();
+    let source = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(TargetId::Stack)),
+    )
+    .expect("open");
+    let sig_before = source.try_signature().expect("signature");
+    git(&root, &["branch", "-f", "main", "auth-1"]);
+    let stack = stack_of(&root);
+    assert_eq!(stack.ids(), vec![branch("auth-2"), TargetId::Stack]);
+    assert_eq!(
+        stack.find(&branch("auth-2")).expect("auth-2").position,
+        Some(1)
+    );
+    assert_ne!(source.try_signature().expect("signature"), sig_before);
+}
+
+#[test]
+fn signature_moves_when_a_pr_is_added_on_top_and_holds_on_touch() {
+    let (_dir, root) = stack_repo();
+    let source = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-1"))),
+    )
+    .expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    assert_eq!(source.try_signature().expect("signature"), sig1, "stable");
+
+    // Touching a tracked file without changing it: git status shows nothing.
+    let content = std::fs::read_to_string(root.join("src/b.txt")).expect("read");
+    write(&root, "src/b.txt", &content);
+    assert_eq!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "touch holds"
+    );
+
+    git(&root, &["checkout", "-q", "-b", "auth-3"]);
+    write(&root, "src/c.txt", "charlie\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "Add charlie"]);
+    assert_ne!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "new PR on top"
+    );
+    assert_eq!(
+        stack_of(&root).ids(),
+        vec![
+            branch("auth-1"),
+            branch("auth-2"),
+            branch("auth-3"),
+            TargetId::Stack
+        ]
+    );
+}
+
+#[test]
+fn signature_errs_when_the_selected_branch_is_deleted() {
+    let (_dir, root) = stack_repo();
+    let source = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(branch("auth-1"))),
+    )
+    .expect("open");
+    source.try_signature().expect("signature");
+    git(&root, &["branch", "-D", "auth-1"]);
+    let err = source.try_signature().expect_err("branch gone");
+    assert!(matches!(err, SourceError::TargetNotInStack { .. }), "{err}");
+    // The stack itself is still there, one PR shorter.
+    let stack = stack_of(&root);
+    assert_eq!(stack.ids(), vec![branch("auth-2"), TargetId::Stack]);
+    assert_eq!(
+        stack.find(&branch("auth-2")).expect("auth-2").commit_count,
+        2
+    );
+    assert_eq!(stack.fallback_target(), Some(TargetId::Stack));
+}
+
+#[test]
+fn detached_head_above_the_branches_adds_a_head_target() {
+    let (_dir, root) = stack_repo();
+    git(&root, &["checkout", "-q", "--detach"]);
+    write(&root, "src/wip.txt", "wip\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "wip commit"]);
+    let stack = stack_of(&root);
+    assert_eq!(
+        stack.ids(),
+        vec![
+            branch("auth-1"),
+            branch("auth-2"),
+            TargetId::Head,
+            TargetId::Stack
+        ]
+    );
+    let head = stack.find(&TargetId::Head).expect("head");
+    assert_eq!(head.subject.as_deref(), Some("wip commit"));
+    assert_eq!(head.commit_count, 1);
+    assert_eq!(
+        head.comparison.old,
+        Endpoint::Commit {
+            oid: oid_of(&root, "auth-2")
+        }
+    );
+    assert_eq!(
+        head.comparison.new,
+        Endpoint::Commit {
+            oid: oid_of(&root, "HEAD")
+        }
+    );
+}
+
+#[test]
+fn aliases_prefer_the_checked_out_branch_then_sort() {
+    let (_dir, root) = stack_repo();
+    git(&root, &["branch", "zz-alias", "auth-2"]);
+    git(&root, &["branch", "aa-alias", "auth-2"]);
+    let stack = stack_of(&root);
+    let top = stack
+        .find(&branch("auth-2"))
+        .expect("checked-out branch wins");
+    assert_eq!(
+        top.aliases,
+        vec!["aa-alias".to_string(), "zz-alias".to_string()]
+    );
+
+    git(&root, &["checkout", "-q", "main"]);
+    git(&root, &["checkout", "-q", "--detach", "auth-2"]);
+    let stack = stack_of(&root);
+    assert_eq!(
+        stack.targets[1].id,
+        branch("aa-alias"),
+        "alphabetical when detached"
+    );
+    assert_eq!(
+        stack.targets[1].aliases,
+        vec!["auth-2".to_string(), "zz-alias".to_string()]
+    );
+}
+
+#[test]
+fn worktree_target_appears_and_disappears_with_an_untracked_file() {
+    let (_dir, root) = stack_repo();
+    assert!(stack_of(&root).find(&TargetId::Worktree).is_none());
+    write(&root, "notes.txt", "scratch\n");
+    let dirty = stack_of(&root);
+    let worktree = dirty.find(&TargetId::Worktree).expect("worktree target");
+    assert_eq!(
+        worktree.comparison.old,
+        Endpoint::Commit {
+            oid: oid_of(&root, "HEAD")
+        }
+    );
+    assert_eq!(worktree.comparison.new, Endpoint::Worktree);
+    assert_eq!(
+        dirty.default_target(),
+        Some(branch("auth-2")),
+        "default stays the top PR"
+    );
+
+    let source = GitSource::open_with(
+        &root,
+        CompareSpec::stack(Some("main".into()), Some(TargetId::Worktree)),
+    )
+    .expect("open worktree target");
+    let paths: Vec<String> = source
+        .listing()
+        .expect("files")
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(paths, vec!["notes.txt"]);
+
+    std::fs::remove_file(root.join("notes.txt")).expect("rm");
+    assert!(stack_of(&root).find(&TargetId::Worktree).is_none());
+    let err = source.try_signature().expect_err("worktree target gone");
+    assert!(matches!(err, SourceError::TargetNotInStack { .. }), "{err}");
+}
+
+#[test]
+fn empty_stack_is_an_error_when_clean_and_worktree_only_when_dirty() {
+    let (_dir, root) = repo(&[("f.txt", "x\n")]);
+    let err = GitSource::open_with(&root, CompareSpec::stack(Some("main".into()), None))
+        .expect_err("nothing to review");
+    assert!(matches!(err, SourceError::EmptyStack { .. }), "{err}");
+    assert!(stack_of(&root).targets.is_empty());
+
+    write(&root, "f.txt", "y\n");
+    let source = GitSource::open_with(&root, CompareSpec::stack(Some("main".into()), None))
+        .expect("dirty tree opens");
+    assert_eq!(source.selected_target(), Some(&TargetId::Worktree));
+    assert_eq!(
+        source.stack().expect("stack").ids(),
+        vec![TargetId::Worktree]
+    );
+}
+
+#[test]
+fn unborn_head_is_a_typed_error_for_stacks_and_commits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    let err = GitSource::open_with(&root, CompareSpec::stack(Some("main".into()), None))
+        .expect_err("unborn");
+    // Trunk resolution runs first: `main` does not exist yet either.
+    assert!(
+        matches!(
+            err,
+            SourceError::InvalidRef { .. } | SourceError::UnbornHead
+        ),
+        "{err}"
+    );
+    let err = GitSource::open_with(&root, CompareSpec::stack(None, None)).expect_err("unborn");
+    assert!(matches!(err, SourceError::NoTrunk { .. }), "{err}");
+    let err = GitSource::open_with(&root, CompareSpec::commit("HEAD")).expect_err("unborn");
+    assert!(matches!(err, SourceError::InvalidRef { .. }), "{err}");
+}
+
+#[test]
+fn toplevel_finds_the_working_tree_root_from_a_subdirectory() {
+    let (_dir, root) = repo(&[("sub/dir/f.txt", "x\n")]);
+    let top = GitSource::toplevel(&root.join("sub/dir")).expect("toplevel");
+    assert_eq!(
+        top.canonicalize().expect("canon"),
+        root.canonicalize().expect("canon")
+    );
+    let outside = tempfile::tempdir().expect("tempdir");
+    assert_eq!(GitSource::toplevel(outside.path()), None);
+}
