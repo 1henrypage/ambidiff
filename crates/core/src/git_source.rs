@@ -63,13 +63,19 @@ pub struct SourceLimits {
     pub git_deadline: Duration,
 }
 
+/// How long any single git invocation may run by default, for
+/// [`SourceLimits`] and the handful of plumbing calls made before a
+/// `GitSource` exists (repository detection, the exclude path, the
+/// top-level lookup).
+pub const DEFAULT_GIT_DEADLINE: Duration = Duration::from_secs(10);
+
 impl Default for SourceLimits {
     fn default() -> Self {
         SourceLimits {
             changed_lines: 10_000,
             untracked_bytes: 2 * 1024 * 1024,
             raw_bytes: 8 * 1024 * 1024,
-            git_deadline: Duration::from_secs(10),
+            git_deadline: DEFAULT_GIT_DEADLINE,
         }
     }
 }
@@ -206,7 +212,7 @@ impl GitSource {
             Path::new("git"),
             start,
             &["rev-parse", "--show-toplevel"],
-            Duration::from_secs(10),
+            DEFAULT_GIT_DEADLINE,
             None,
         )
         .ok()?;
@@ -911,7 +917,7 @@ fn git_exclude_path(root: &Path) -> io::Result<PathBuf> {
         Path::new("git"),
         root,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        Duration::from_secs(10),
+        DEFAULT_GIT_DEADLINE,
         None,
     )
     .map_err(source_error_to_io)?;
@@ -1439,7 +1445,7 @@ fn is_repo_with(git: &Path, root: &Path) -> bool {
         git,
         root,
         &["rev-parse", "--is-inside-work-tree"],
-        Duration::from_secs(10),
+        DEFAULT_GIT_DEADLINE,
         None,
         &mut |chunk| {
             out.extend_from_slice(chunk);
@@ -1488,8 +1494,17 @@ struct RunResult {
 /// thread feeds stdout to `sink` in bounded chunks (never buffering the
 /// whole output itself; that is `sink`'s job), a stderr thread captures
 /// diagnostics, an optional stdin thread feeds `stdin_data`, and a killer
-/// thread enforces `deadline` by killing the child. All threads are joined
-/// before `wait`.
+/// thread enforces `deadline` by terminating the child. All threads are
+/// joined before `wait`.
+///
+/// The child leads its own process group (unix) and both kill sites (the
+/// deadline and the output budget) signal the whole group, so a grandchild
+/// that inherited the stdout pipe cannot keep the reader blocked past the
+/// deadline. A grandchild that puts itself in a new session (`setsid`) is
+/// out of reach and out of scope; on non-unix only the child itself is
+/// killed. The group also detaches these short-lived children from the
+/// terminal's SIGINT/SIGHUP, which is fine: git never touches the tty
+/// here and dies on EPIPE (or at completion) if ambidiff is killed.
 fn run_git(
     git: &Path,
     root: &Path,
@@ -1513,6 +1528,14 @@ fn run_git(
     });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Lead a fresh process group so `terminate` can reach a grandchild
+    // holding the stdio pipes (a hook, a helper, a wrapper's background
+    // job); the group id is the child's pid by construction.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     let context = || format!("run {} {}", git.display(), args.join(" "));
     let mut child = cmd.spawn().map_err(|e| SourceError::Io {
@@ -1554,7 +1577,7 @@ fn run_git(
                 }
                 if let Err(e) = sink(&buf[..n]) {
                     if let Ok(mut c) = child_ref.lock() {
-                        let _ = c.kill();
+                        terminate(&mut c);
                     }
                     return Err(e);
                 }
@@ -1578,7 +1601,7 @@ fn run_git(
             if done_rx.recv_timeout(deadline).is_err() {
                 timed_out_ref.store(true, Ordering::SeqCst);
                 if let Ok(mut c) = child_ref.lock() {
-                    let _ = c.kill();
+                    terminate(&mut c);
                 }
             }
         });
@@ -1623,6 +1646,27 @@ fn run_git(
         exit_code: status.code(),
         stderr: stderr_bytes,
     })
+}
+
+/// Kill a git child and everything it spawned: `SIGKILL` to the process
+/// group the child leads (unix; the group id is the child's own pid, so
+/// this can never reach a foreign group), then `Child::kill` as the
+/// portable fallback and the only action elsewhere. Errors are ignored: the
+/// group may already be gone, and the caller reports the timeout or the
+/// budget, not the kill.
+fn terminate(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // Safety: a plain signal to a process group this process created
+            // and has not yet reaped (`wait` runs after the threads join),
+            // so the id cannot have been recycled.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 /// One-shot capture of a small git command's stdout as text, for
