@@ -18,10 +18,12 @@ use ambidiff_core::model::{FileEntry, FileStatus};
 use ambidiff_core::parser::parse_file_diff;
 use ambidiff_core::protocol::{
     DecodeError, decode_comment_add, decode_comment_delete, decode_comment_edit, decode_expand,
-    decode_lifecycle, decode_view, decode_view_options,
+    decode_lifecycle, decode_target_select, decode_view, decode_view_options,
 };
 use ambidiff_core::review::{Comment, parse_review, to_json};
 use ambidiff_core::rows::{GapInfo, Row, ViewMode, build_expansion_rows};
+use ambidiff_core::source::Comparison;
+use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::view::{ViewOptions, build_file_view};
 
 fn fixture_dir() -> PathBuf {
@@ -96,6 +98,9 @@ fn request_fixtures_decode_as_specified() {
     check_request_cases("request-expand.json", |v, _| {
         decode_expand(v).map(|r| to_value(&r))
     });
+    check_request_cases("request-target-select.json", |v, _| {
+        decode_target_select(v).map(|r| to_value(&r))
+    });
 }
 
 #[test]
@@ -113,6 +118,7 @@ fn every_envelope_payload_decodes_with_its_transport_spelling() {
             "comment.address" | "comment.resolve" | "comment.reopen" => {
                 decode_lifecycle(&params, "id").map(|_| ())
             }
+            "target.select" => decode_target_select(&params).map(|_| ()),
             _ => Ok(()),
         };
         result.unwrap_or_else(|e| panic!("stdio {method}: {e}"));
@@ -126,6 +132,7 @@ fn every_envelope_payload_decodes_with_its_transport_spelling() {
             "comment.address" | "comment.resolve" | "comment.reopen" => {
                 decode_lifecycle(msg, "commentId").map(|_| ())
             }
+            "target.select" => decode_target_select(msg).map(|_| ()),
             _ => Ok(()),
         };
         result.unwrap_or_else(|e| panic!("web {kind}: {e}"));
@@ -142,6 +149,7 @@ fn comment_fixtures_are_the_core_serialisation() {
         "stdio-comment-add.json",
         "stdio-comment-edit.json",
         "stdio-comment-address.json",
+        "stdio-comment-add-target.json",
     ] {
         let doc = fixture(file);
         let comment: Comment =
@@ -171,6 +179,52 @@ fn review_fixture_parses_cleanly_and_reserialises_identically() {
         text,
         "canonical on-disk form"
     );
+}
+
+#[test]
+fn stack_target_fixtures_are_the_core_serialisation() {
+    let doc = fixture("stdio-target-select.json");
+    let targets: Vec<Target> = serde_json::from_value(doc["targets"].clone()).expect("targets");
+    assert_eq!(
+        to_value(&targets),
+        doc["targets"],
+        "every field, none skipped"
+    );
+    let selected: TargetId = serde_json::from_value(doc["selected"].clone()).expect("selected");
+    assert_eq!(
+        selected,
+        TargetId::Branch {
+            name: "auth-2".into()
+        }
+    );
+    let comparison: Comparison =
+        serde_json::from_value(doc["comparison"].clone()).expect("comparison");
+    let chosen = targets
+        .iter()
+        .find(|t| t.id == selected)
+        .expect("selected target is listed");
+    assert_eq!(
+        chosen.comparison, comparison,
+        "comparison is the selected target's"
+    );
+    assert_eq!(
+        targets.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(),
+        vec!["auth-1", "auth-2", "stack", "worktree"]
+    );
+
+    let web = fixture("web-target-selected.json");
+    assert_eq!(web["type"], "targetSelected");
+    for key in ["selected", "targets", "comparison", "generation"] {
+        assert_eq!(
+            web[key], doc[key],
+            "{key}: the ack carries the stdio payload"
+        );
+    }
+
+    // A comment carrying a target keeps it through parse and serialise.
+    let tagged: Comment =
+        serde_json::from_value(fixture("stdio-comment-add-target.json")).expect("comment");
+    assert_eq!(tagged.target, Some(selected));
 }
 
 fn fixture_entry() -> FileEntry {
