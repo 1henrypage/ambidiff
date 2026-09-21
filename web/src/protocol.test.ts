@@ -25,9 +25,15 @@ import {
   decodeProjectionSnapshot,
   decodeSearchMatch,
   decodeServerMessage,
+  decodeTarget,
+  decodeTargetId,
+  decodeTargetSelect,
   decodeTreeRow,
   decodeView,
   decodeViewOptions,
+  sameTarget,
+  targetKey,
+  targetLabel,
   type ServerMessage,
 } from "./protocol";
 
@@ -84,6 +90,46 @@ describe("request decoders", () => {
     check("request-view-options.json", (p) => decodeViewOptions(p));
     check("request-view.json", (p) => decodeView(p));
     check("request-expand.json", (p) => decodeExpand(p));
+    check("request-target-select.json", (p) => decodeTargetSelect(p));
+  });
+
+  test("target_ids_decode_with_nested_field_names_and_compare_by_key", () => {
+    expect(decodeTargetId({ kind: "branch", name: "auth-2" })).toEqual({ kind: "branch", name: "auth-2" });
+    expect(decodeTargetId({ kind: "worktree" })).toEqual({ kind: "worktree" });
+    const errors: [unknown, DecodeError["kind"], string][] = [
+      ["auth-2", "wrongType", "target"],
+      [{ name: "x" }, "missing", "target.kind"],
+      [{ kind: 3 }, "wrongType", "target.kind"],
+      [{ kind: "tag" }, "unknown", "target.kind"],
+      [{ kind: "branch" }, "missing", "target.name"],
+      [{ kind: "branch", name: 7 }, "wrongType", "target.name"],
+    ];
+    for (const [raw, kind, field] of errors) {
+      let caught: unknown;
+      try {
+        decodeTargetId(raw);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(DecodeError);
+      expect({ kind: (caught as DecodeError).kind, field: (caught as DecodeError).field }).toEqual({ kind, field });
+    }
+    expect(targetKey({ kind: "branch", name: "auth-2" })).toBe("branch:auth-2");
+    expect(targetKey({ kind: "stack" })).toBe("stack");
+    expect(targetLabel({ kind: "branch", name: "auth-2" })).toBe("auth-2");
+    expect(targetLabel({ kind: "head" })).toBe("head");
+    expect(sameTarget({ kind: "branch", name: "a" }, { kind: "branch", name: "a" })).toBe(true);
+    expect(sameTarget({ kind: "branch", name: "a" }, { kind: "stack" })).toBe(false);
+    expect(sameTarget(null, null)).toBe(true);
+    expect(sameTarget(null, { kind: "stack" })).toBe(false);
+  });
+
+  test("target_fixtures_decode_and_reserialise_identically", () => {
+    const doc = fixture("stdio-target-select.json") as { targets: unknown[]; selected: unknown };
+    for (const raw of doc.targets) expect(plain(decodeTarget(raw))).toEqual(raw);
+    expect(decodeTargetId(doc.selected)).toEqual({ kind: "branch", name: "auth-2" });
+    const tagged = fixture("stdio-comment-add-target.json");
+    expect(plain(decodeComment(tagged))).toEqual(tagged);
   });
 
   test("every_web_envelope_is_a_known_client_message", () => {
@@ -181,6 +227,10 @@ describe("server messages", () => {
       reviewLevelComments: 0,
       unattachedComments: 0,
       overview: [],
+      selected: { kind: "branch", name: "auth-2" },
+      targetCounts: [{ id: { kind: "branch", name: "auth-2" }, counts: { todo: 1, total: 2 } }],
+      untargetedComments: 0,
+      wasOnComments: 0,
     };
     expect(decodeProjectionSnapshot(raw)).toEqual(raw as never);
     expect(() => decodeProjectionSnapshot({ ...raw, filter: "nope" })).toThrow(DecodeError);

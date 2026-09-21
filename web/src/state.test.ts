@@ -3,7 +3,7 @@
 // write guards -- all against fakes, no DOM and no real wasm.
 import { describe, expect, test } from "bun:test";
 
-import type { CommentMessage, FileEntry, FileMessage, HelloMessage, SrcMessage } from "./protocol";
+import type { CommentMessage, FileEntry, FileMessage, HelloMessage, SrcMessage, Target } from "./protocol";
 import { Store, WriteBlocked } from "./state";
 import { FakeCore, emptyView } from "./testing/fakeCore";
 import { FakeTransport } from "./testing/fakeTransport";
@@ -24,6 +24,9 @@ function hello(files: FileEntry[]): HelloMessage {
     sourceError: null,
     skipped: [],
     comparison: null,
+    targets: [],
+    selected: null,
+    commit: null,
     generation: 0,
   };
 }
@@ -110,7 +113,7 @@ describe("navigation ownership (B14)", () => {
 describe("diff and review reconciliation", () => {
   test("vanished_file_switches_to_overview", async () => {
     const { store } = await bootedOn("a.ts");
-    store.onDiffChanged({ files: [{ path: "b.ts", status: "modified" }], skipped: [], sourceError: null });
+    store.onDiffChanged({ files: [{ path: "b.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
     expect(store.nav).toEqual({ kind: "overview" });
     expect(store.flash).toContain("no longer in this diff");
   });
@@ -121,6 +124,9 @@ describe("diff and review reconciliation", () => {
       files: [{ path: "a2.ts", oldPath: "a.ts", status: "renamed" }],
       skipped: [],
       sourceError: null,
+      targets: [],
+      selected: null,
+      commit: null,
     });
     expect(store.nav).toEqual({ kind: "file", path: "a2.ts" });
     transport.answer("getFile", "a2.ts", fileMsg("a2.ts"));
@@ -155,7 +161,7 @@ describe("expansion (B10)", () => {
 
     store.expandGap("g1");
     // The diff changes underneath the in-flight getSrc (bumps core.generation).
-    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null });
+    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
     transport.answer("getFile", "a.ts", fileMsg("a.ts"));
     await tick();
 
@@ -171,7 +177,7 @@ describe("expansion (B10)", () => {
     const restored = emptyView("a.ts");
     core.nextExpand = { expansion: { gap: { id: "g1", count: 2, oldRange: [1, 2], newRange: [1, 2] }, at: 0, rows: [] }, view: restored, comments: [] };
 
-    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null });
+    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
     transport.answer("getFile", "a.ts", fileMsg("a.ts"));
     await tick();
     transport.answer("getSrc", "a.ts", { type: "src", id: 0, path: "a.ts", content: "full" } as SrcMessage);
@@ -439,6 +445,9 @@ describe("refresh (B22)", () => {
       sourceError: null,
       skipped: [],
       comparison: null,
+      targets: [],
+      selected: null,
+      commit: null,
       generation: 0,
     });
     await refreshDone;
@@ -460,5 +469,202 @@ describe("review broadcasts (B21), exact naming", () => {
     store.onReviewChanged({ review: "", warnings: [], readOnly: false, readOnlyReason: null });
     expect(store.summary).toBe(before);
     expect(store.diagnostics.reviewError).toBe("empty or unparsable review string");
+  });
+});
+
+// ------------------------------------------------------------ stack targets
+
+function target(name: string, position: number): Target {
+  return {
+    id: { kind: "branch", name },
+    label: name,
+    position,
+    tip: `${position}`.repeat(40),
+    commitCount: 1,
+    subject: `subject ${name}`,
+    aliases: [],
+    comparison: { old: { kind: "commit", oid: "1".repeat(40) }, new: { kind: "commit", oid: "2".repeat(40) } },
+  };
+}
+
+function stackTargets(): Target[] {
+  return [
+    target("auth-1", 1),
+    target("auth-2", 2),
+    {
+      id: { kind: "stack" },
+      label: "stack",
+      position: null,
+      tip: "3".repeat(40),
+      commitCount: 2,
+      subject: null,
+      aliases: [],
+      comparison: { old: { kind: "commit", oid: "1".repeat(40) }, new: { kind: "commit", oid: "3".repeat(40) } },
+    },
+  ];
+}
+
+async function bootedStack() {
+  const files: FileEntry[] = [{ path: "src/b.ts", status: "modified" }];
+  const core = new FakeCore();
+  const transport = new FakeTransport();
+  transport.nextHello = {
+    ...hello(files),
+    targets: stackTargets(),
+    selected: { kind: "branch", name: "auth-2" },
+  };
+  const store = new Store(core, transport);
+  await store.connect("tok");
+  transport.answer("getFile", "src/b.ts", fileMsg("src/b.ts"));
+  await tick();
+  return { core, transport, store };
+}
+
+describe("stack targets", () => {
+  test("hello_scopes_the_core_to_the_stack_before_projecting", async () => {
+    const { store, core } = await bootedStack();
+    expect(store.isStack()).toBe(true);
+    expect(store.selectedLabel()).toBe("auth-2");
+    expect(store.targetIndex()).toBe(1);
+    const scope = core.targetScopes.at(-1);
+    expect(scope?.selected).toEqual({ kind: "branch", name: "auth-2" });
+    expect(scope?.targets.map((t) => (t.kind === "branch" ? t.name : t.kind))).toEqual(["auth-1", "auth-2", "stack"]);
+    expect(store.projection?.selected).toEqual({ kind: "branch", name: "auth-2" });
+  });
+
+  test("a_plain_review_is_not_a_stack_and_never_scopes", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    expect(store.isStack()).toBe(false);
+    expect(core.targetScopes.at(-1)).toEqual({ targets: [], selected: null });
+    store.stepTarget(1);
+    expect(store.flash).toBe("not a stack review");
+  });
+
+  test("select_target_acks_then_the_diff_broadcast_reloads_the_files", async () => {
+    const { store, transport, core } = await bootedStack();
+    store.selectTarget({ kind: "branch", name: "auth-1" });
+    const req = transport.find("target.select");
+    expect(req).toBeDefined();
+    expect(req?.msg).toEqual({ type: "target.select", target: { kind: "branch", name: "auth-1" } });
+    // No file is fetched on the request alone.
+    expect(transport.find("getFile")).toBeUndefined();
+
+    transport.answer("target.select", undefined, {
+      type: "targetSelected",
+      id: 0,
+      selected: { kind: "branch", name: "auth-1" },
+      targets: stackTargets(),
+      comparison: null,
+      generation: 2,
+    });
+    await tick();
+    expect(store.selectedLabel()).toBe("auth-1");
+    expect(store.flash).toBe("target: auth-1");
+    expect(core.targetScopes.at(-1)?.selected).toEqual({ kind: "branch", name: "auth-1" });
+    expect(transport.find("getFile")).toBeUndefined();
+
+    // The listing arrives as every tab's diffChanged; the old file is gone
+    // and the new target's first file opens.
+    store.onDiffChanged({
+      files: [{ path: "src/a.ts", status: "modified" }],
+      skipped: [],
+      sourceError: null,
+      targets: stackTargets(),
+      selected: { kind: "branch", name: "auth-1" },
+      commit: null,
+    });
+    expect(store.nav).toEqual({ kind: "file", path: "src/a.ts" });
+    expect(transport.find("getFile", "src/a.ts")).toBeDefined();
+    transport.answer("getFile", "src/a.ts", fileMsg("src/a.ts"));
+    await tick();
+    expect(store.pane?.kind === "file" && store.pane.view.path).toBe("src/a.ts");
+  });
+
+  test("another_tabs_selection_arrives_through_diff_changed_alone", async () => {
+    const { store, core } = await bootedStack();
+    store.onDiffChanged({
+      files: [{ path: "src/a.ts", status: "modified" }],
+      skipped: [],
+      sourceError: null,
+      targets: stackTargets(),
+      selected: { kind: "branch", name: "auth-1" },
+      commit: null,
+    });
+    expect(store.selectedLabel()).toBe("auth-1");
+    expect(core.targetScopes.at(-1)?.selected).toEqual({ kind: "branch", name: "auth-1" });
+    expect(store.nav).toEqual({ kind: "file", path: "src/a.ts" });
+  });
+
+  test("selecting_the_current_target_is_a_no_op", async () => {
+    const { store, transport } = await bootedStack();
+    store.selectTarget({ kind: "branch", name: "auth-2" });
+    expect(transport.find("target.select")).toBeUndefined();
+  });
+
+  test("step_target_stops_at_both_ends", async () => {
+    const { store, transport } = await bootedStack();
+    store.stepTarget(1);
+    expect(transport.find("target.select")?.msg).toEqual({ type: "target.select", target: { kind: "stack" } });
+    transport.answer("target.select", undefined, {
+      type: "targetSelected",
+      id: 0,
+      selected: { kind: "stack" },
+      targets: stackTargets(),
+      comparison: null,
+      generation: 2,
+    });
+    await tick();
+    store.stepTarget(1);
+    expect(store.flash).toBe("top of stack");
+    expect(transport.find("target.select")).toBeUndefined();
+
+    store.onTargetSelected({ selected: { kind: "branch", name: "auth-1" }, targets: stackTargets() });
+    store.stepTarget(-1);
+    expect(store.flash).toBe("bottom of stack");
+    expect(transport.find("target.select")).toBeUndefined();
+  });
+
+  test("a_rejected_selection_flashes_and_keeps_the_current_target", async () => {
+    const { store, transport } = await bootedStack();
+    store.selectTarget({ kind: "branch", name: "auth-9" });
+    transport.fail("target.select", undefined, new TransportError("error", "target auth-9 is not in the stack", "unknownTarget"));
+    await tick();
+    expect(store.selectedLabel()).toBe("auth-2");
+    expect(store.flash).toContain("auth-9");
+  });
+
+  test("add_comment_carries_the_selected_target_in_a_stack", async () => {
+    const { store, transport } = await bootedStack();
+    void store.addComment("bravo??", { path: "src/b.ts", side: "new", line: 1 });
+    const req = transport.find("comment.add");
+    expect(req?.msg).toEqual({
+      type: "comment.add",
+      body: "bravo??",
+      path: "src/b.ts",
+      side: "new",
+      line: 1,
+      target: { kind: "branch", name: "auth-2" },
+    });
+
+    const plain = await bootedOn("a.ts");
+    void plain.store.addComment("note", { path: "a.ts" });
+    expect("target" in (plain.transport.find("comment.add")?.msg ?? {})).toBe(false);
+  });
+
+  test("target_counts_read_the_projection", async () => {
+    const { store, core } = await bootedStack();
+    core.targetCounts = [{ id: { kind: "branch", name: "auth-1" }, counts: { todo: 2, total: 3 } }];
+    store.onReviewChanged({ review: "r", warnings: [], readOnly: false, readOnlyReason: null });
+    expect(store.targetCounts({ kind: "branch", name: "auth-1" })).toEqual({ todo: 2, total: 3 });
+    expect(store.targetCounts({ kind: "stack" })).toEqual({ todo: 0, total: 0 });
+  });
+
+  test("a_commit_review_exposes_its_banner_summary", async () => {
+    const files: FileEntry[] = [{ path: "a.ts", status: "modified" }];
+    const { store, transport } = harness(files);
+    transport.nextHello = { ...hello(files), commit: { oid: "abcdef1234567890", subject: "add bravo" } };
+    await store.connect("tok");
+    expect(store.commit?.subject).toBe("add bravo");
+    expect(store.isStack()).toBe(false);
   });
 });

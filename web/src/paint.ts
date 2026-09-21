@@ -112,6 +112,8 @@ export interface CommentRecord {
   anchor: RowAnchor | null;
   wasPath: string | null;
   unattached: boolean;
+  /** The target the comment was made on when that target left the stack. */
+  wasOn: string | null;
 }
 
 export type DisplayLine =
@@ -140,7 +142,22 @@ function card(out: DisplayLine[], record: CommentRecord): void {
 }
 
 export function toRecord(anchored: AnchoredComment): CommentRecord {
-  return { comment: anchored.comment, anchor: anchored.anchor, wasPath: anchored.wasPath, unattached: false };
+  return {
+    comment: anchored.comment,
+    anchor: anchored.anchor,
+    wasPath: anchored.wasPath,
+    unattached: false,
+    wasOn: null,
+  };
+}
+
+/** The unattached group's heading: files gone from the diff, targets gone
+ * from the stack, or both (mirrors the TUI's wording). */
+export function unattachedHeading(records: readonly CommentRecord[]): string {
+  const gone = records.filter((r) => r.wasOn !== null).length;
+  if (gone === 0) return `unattached (${records.length}) - files no longer in this diff`;
+  if (gone === records.length) return `unattached (${gone}) - targets no longer in the stack`;
+  return `unattached (${records.length}) - files no longer in this diff, ${gone} from targets no longer in the stack`;
 }
 
 /**
@@ -159,10 +176,7 @@ export function buildDisplay(pane: Pane): DisplayLine[] {
     for (const record of reviewLevel) card(out, record);
     if (unattached.length > 0) {
       out.push({ kind: "blank" });
-      out.push({
-        kind: "section",
-        text: `unattached (${unattached.length}) - files no longer in this diff`,
-      });
+      out.push({ kind: "section", text: unattachedHeading(unattached) });
       for (const record of unattached) card(out, record);
     }
     return out;

@@ -3,7 +3,7 @@
 // bodies, paths, snippets, diff content) reaches the DOM through text
 // nodes / `textContent`, never `innerHTML`, so nothing a repo or a
 // reviewer wrote can inject markup.
-import type { Cell, Row } from "./protocol";
+import { type Cell, type Row, type TargetId, sameTarget } from "./protocol";
 import { HeightIndex, type CommentRecord, type DisplayLine, type Segment, composeSegments, gutterDigits } from "./paint";
 import type { Store } from "./state";
 
@@ -26,6 +26,8 @@ const FILE_STATUS_LETTER: Record<string, string> = {
 
 export interface RenderDom {
   app: HTMLElement;
+  /** The target strip across the top (stack reviews only). */
+  strip: HTMLElement;
   tree: HTMLElement;
   banner: HTMLElement;
   diag: HTMLElement;
@@ -42,6 +44,7 @@ export interface RenderActions {
   openFile(path: string): void;
   expandGap(gapId: string): void;
   onRowClick(displayIndex: number, cell: "left" | "right" | null): void;
+  selectTarget(id: TargetId): void;
 }
 
 function clear(el: HTMLElement): void {
@@ -113,6 +116,39 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
     });
   }
 
+  /** The target strip: one cell per target in stack order, the selected
+   * one framed, the selected subject right-aligned. Hidden outside stacks. */
+  function renderStrip(): void {
+    clear(dom.strip);
+    if (!store.isStack()) {
+      dom.strip.hidden = true;
+      return;
+    }
+    dom.strip.hidden = false;
+    if (store.targets.length === 0) {
+      dom.strip.appendChild(span("dim", "no targets: HEAD is at trunk and the tree is clean"));
+      return;
+    }
+    for (const target of store.targets) {
+      const cell = document.createElement("span");
+      const selected = sameTarget(target.id, store.selected);
+      cell.className = "target" + (selected ? " selected" : "");
+      cell.dataset["target"] = target.label;
+      const counts = store.targetCounts(target.id);
+      let text = target.position !== null ? `${target.position} ${target.label}` : target.label;
+      if (counts.total > 0) text += ` ○${counts.todo}/${counts.total}`;
+      cell.textContent = selected ? `[${text}]` : text;
+      cell.title = target.subject ?? target.label;
+      cell.onclick = () => actions.selectTarget(target.id);
+      dom.strip.appendChild(cell);
+    }
+    const subject = store.selectedTarget()?.subject;
+    if (subject) {
+      const s = span("subject", subject);
+      dom.strip.appendChild(s);
+    }
+  }
+
   function renderBanner(): void {
     clear(dom.banner);
     if (store.nav.kind === "overview") {
@@ -125,6 +161,10 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
             ` rev ${s.revision} • ○${s.counts.open} ↺${s.counts.reopened} ◐${s.counts.addressed} ●${s.counts.resolved}`,
           ),
         );
+        if (store.commit) {
+          dom.banner.appendChild(document.createTextNode(" • "));
+          dom.banner.appendChild(span("commit", `commit ${store.commit.oid.slice(0, 8)} ${store.commit.subject}`));
+        }
       }
       return;
     }
@@ -189,6 +229,8 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
     dom.statusbar.appendChild(span(null, left));
     dom.statusbar.appendChild(span("msg", store.flash ?? ""));
     const toggles = [
+      store.isStack() ? `target:${store.selectedLabel() ?? "-"}` : "",
+      store.commit ? `commit:${store.commit.oid.slice(0, 8)}` : "",
       store.options.mode,
       store.options.wordDiff ? "word" : "",
       store.wrap ? "wrap" : "",
@@ -234,6 +276,7 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
       div.appendChild(span("gut", `${record.comment.status} rev ${record.comment.rev} by ${record.comment.author} `));
       if (record.comment.body.includes("??")) div.appendChild(span("qbadge", "[question] "));
       if (record.anchor?.outdated) div.appendChild(span("obadge", "[outdated] "));
+      if (record.wasOn !== null) div.appendChild(span("obadge", `(was on ${record.wasOn}) `));
       if (record.wasPath) div.appendChild(span("obadge", `(was ${record.wasPath}) `));
     } else if (kind === "cline") {
       div.appendChild(span("border", "  │ "));
@@ -482,6 +525,7 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
     dom.app.classList.toggle("no-gutter", !store.showLineNumbers);
     dom.app.classList.toggle("wrap", store.wrap);
     dom.body.dataset["theme"] = store.options.theme === "light" ? "light" : "dark";
+    renderStrip();
     renderTree();
     renderBanner();
     renderDiag();

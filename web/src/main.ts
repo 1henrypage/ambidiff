@@ -40,6 +40,7 @@ async function main(): Promise<void> {
 
   const dom = {
     app: el<HTMLElement>("app"),
+    strip: el<HTMLElement>("strip"),
     tree: el<HTMLElement>("tree"),
     banner: el<HTMLElement>("banner"),
     diag: el<HTMLElement>("diag"),
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
     openFile: (path) => store.openFile(path, false),
     expandGap: (gapId) => store.expandGap(gapId),
     onRowClick: (index, cell) => store.clickRow(index, cell),
+    selectTarget: (id) => store.selectTarget(id),
   });
 
   const dispatcher = createDispatcher(store, editor, renderer.render);

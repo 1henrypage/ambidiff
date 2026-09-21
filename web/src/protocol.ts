@@ -152,6 +152,46 @@ export interface FileEntry {
   dels?: number;
 }
 
+/** Which comparison inside a stack review a comment or a view refers to. */
+export type TargetId =
+  | { kind: "branch"; name: string }
+  | { kind: "head" }
+  | { kind: "stack" }
+  | { kind: "worktree" };
+
+/** Stable string key of a target (`branch:<name>` or the kind). */
+export function targetKey(id: TargetId): string {
+  return id.kind === "branch" ? `branch:${id.name}` : id.kind;
+}
+
+export function sameTarget(a: TargetId | null | undefined, b: TargetId | null | undefined): boolean {
+  if (!a || !b) return a === b;
+  return targetKey(a) === targetKey(b);
+}
+
+/** Human label: the branch name, or the kind. */
+export function targetLabel(id: TargetId): string {
+  return id.kind === "branch" ? id.name : id.kind;
+}
+
+/** One reviewable comparison inside a stack; every field is present. */
+export interface Target {
+  id: TargetId;
+  label: string;
+  position: number | null;
+  tip: string | null;
+  commitCount: number;
+  subject: string | null;
+  aliases: string[];
+  comparison: Comparison;
+}
+
+/** The reviewed commit of a single-commit review (the banner). */
+export interface CommitSummary {
+  oid: string;
+  subject: string;
+}
+
 export interface Comment {
   id: string;
   rev: number;
@@ -160,6 +200,7 @@ export interface Comment {
   side?: Side;
   line: number | null;
   endLine?: number;
+  target?: TargetId;
   snippet?: string;
   body: string;
   response?: string;
@@ -271,6 +312,56 @@ export interface Comparison {
 
 // ------------------------------------------------------ core value decoders
 
+/** A `{kind, name?}` target object; errors name the nested field. */
+export function decodeTargetId(v: unknown, at = "target"): TargetId {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw wrongType(at, "an object {kind, name?}");
+  const o = v as JsonObject;
+  const kindField = `${at}.kind`;
+  const rawKind = present(o, "kind");
+  if (rawKind === undefined) throw missing(kindField);
+  if (typeof rawKind !== "string") throw wrongType(kindField, "a string");
+  switch (rawKind) {
+    case "branch": {
+      const nameField = `${at}.name`;
+      const name = present(o, "name");
+      if (name === undefined) throw missing(nameField);
+      if (typeof name !== "string") throw wrongType(nameField, "a string");
+      return { kind: "branch", name };
+    }
+    case "head":
+    case "stack":
+    case "worktree":
+      return { kind: rawKind };
+    default:
+      throw unknown(kindField, rawKind);
+  }
+}
+
+/** A present target, or null when absent/null. */
+export function optTargetId(o: JsonObject, field: string): TargetId | null {
+  const v = present(o, field);
+  return v === undefined ? null : decodeTargetId(v, field);
+}
+
+export function decodeTarget(v: unknown, at = "target"): Target {
+  const o = obj(v, at);
+  return {
+    id: decodeTargetId(o["id"], `${at}.id`),
+    label: str(o, "label"),
+    position: optInt(o, "position") ?? null,
+    tip: optStr(o, "tip") ?? null,
+    commitCount: int(o, "commitCount"),
+    subject: optStr(o, "subject") ?? null,
+    aliases: arr(o, "aliases", strings),
+    comparison: decodeComparison(o["comparison"], `${at}.comparison`),
+  };
+}
+
+export function decodeCommitSummary(v: unknown, at = "commit"): CommitSummary {
+  const o = obj(v, at);
+  return { oid: str(o, "oid"), subject: str(o, "subject") };
+}
+
 export function decodeFileEntry(v: unknown, at = "entry"): FileEntry {
   const o = obj(v, at);
   const entry: FileEntry = {
@@ -311,6 +402,8 @@ export function decodeComment(v: unknown, at = "comment"): Comment {
   if (side !== undefined) comment.side = side;
   const endLine = optLine(o, "endLine");
   if (endLine !== undefined) comment.endLine = endLine;
+  const target = optTargetId(o, "target");
+  if (target !== null) comment.target = target;
   const snippet = optStr(o, "snippet");
   if (snippet !== undefined) comment.snippet = snippet;
   const response = optStr(o, "response");
@@ -514,6 +607,14 @@ export interface TreeRow {
 export interface OverviewCommentOwned {
   comment: Comment;
   unattached: boolean;
+  /** The target this comment was made on when that target left the stack. */
+  wasOn: string | null;
+}
+
+/** The tally of one live target's own comments (the strip). */
+export interface TargetCounts {
+  id: TargetId;
+  counts: FileCounts;
 }
 
 export interface ProjectionSnapshot {
@@ -524,6 +625,10 @@ export interface ProjectionSnapshot {
   reviewLevelComments: number;
   unattachedComments: number;
   overview: OverviewCommentOwned[];
+  selected: TargetId | null;
+  targetCounts: TargetCounts[];
+  untargetedComments: number;
+  wasOnComments: number;
 }
 
 export interface ExpansionResult {
@@ -564,7 +669,16 @@ export function decodeTreeRow(v: unknown, at = "row"): TreeRow {
 
 export function decodeOverviewComment(v: unknown, at = "overview"): OverviewCommentOwned {
   const o = obj(v, at);
-  return { comment: decodeComment(o["comment"], `${at}.comment`), unattached: bool(o, "unattached") };
+  return {
+    comment: decodeComment(o["comment"], `${at}.comment`),
+    unattached: bool(o, "unattached"),
+    wasOn: optStr(o, "wasOn") ?? null,
+  };
+}
+
+export function decodeTargetCounts(v: unknown, at = "targetCounts"): TargetCounts {
+  const o = obj(v, at);
+  return { id: decodeTargetId(o["id"], `${at}.id`), counts: decodeFileCounts(o["counts"], `${at}.counts`) };
 }
 
 function decodeCounts(v: unknown, at: string): Record<string, FileCounts> {
@@ -584,6 +698,10 @@ export function decodeProjectionSnapshot(v: unknown, at = "projection"): Project
     reviewLevelComments: int(o, "reviewLevelComments"),
     unattachedComments: int(o, "unattachedComments"),
     overview: arr(o, "overview", decodeOverviewComment),
+    selected: optTargetId(o, "selected"),
+    targetCounts: optArr(o, "targetCounts", decodeTargetCounts) ?? [],
+    untargetedComments: optInt(o, "untargetedComments") ?? 0,
+    wasOnComments: optInt(o, "wasOnComments") ?? 0,
   };
 }
 
@@ -623,6 +741,11 @@ export interface CommentAddRequest {
   endLine: number | null;
   body: string;
   author: string | null;
+  target: TargetId | null;
+}
+
+export interface TargetSelectRequest {
+  target: TargetId;
 }
 
 export interface CommentEditRequest {
@@ -667,7 +790,15 @@ export function decodeCommentAdd(v: unknown): CommentAddRequest {
   const side: Side | null = explicitSide ?? (line !== null ? "new" : null);
   const body = str(o, "body");
   const author = optStr(o, "author") ?? null;
-  return { path, side, line, endLine, body, author };
+  const target = optTargetId(o, "target");
+  return { path, side, line, endLine, body, author, target };
+}
+
+export function decodeTargetSelect(v: unknown): TargetSelectRequest {
+  const o = obj(v);
+  const target = optTargetId(o, "target");
+  if (target === null) throw missing("target");
+  return { target };
 }
 
 export function decodeCommentEdit(v: unknown, idField: string): CommentEditRequest {
@@ -724,6 +855,7 @@ export type ClientRequest =
       endLine?: number;
       body: string;
       author?: string;
+      target?: TargetId;
     }
   | { type: "comment.edit"; id: number; commentId: string; body: string }
   | { type: "comment.delete"; id: number; commentId: string }
@@ -731,7 +863,8 @@ export type ClientRequest =
   | { type: "comment.resolve"; id: number; commentId: string }
   | { type: "comment.reopen"; id: number; commentId: string }
   | { type: "comment.resolveAddressed"; id: number }
-  | { type: "rev.bump"; id: number };
+  | { type: "rev.bump"; id: number }
+  | { type: "target.select"; id: number; target: TargetId };
 
 export const CLIENT_MESSAGE_TYPES = [
   "auth",
@@ -746,6 +879,7 @@ export const CLIENT_MESSAGE_TYPES = [
   "comment.reopen",
   "comment.resolveAddressed",
   "rev.bump",
+  "target.select",
 ] as const;
 
 // ------------------------------------------------- server -> client messages
@@ -763,6 +897,12 @@ export interface SnapshotFields {
   sourceError: string | null;
   skipped: SkippedPath[];
   comparison: Comparison | null;
+  /** The stack's targets in order (`[]` outside stack reviews). */
+  targets: Target[];
+  /** The server process's selected target (`null` outside stacks). */
+  selected: TargetId | null;
+  /** The reviewed commit of a single-commit review. */
+  commit: CommitSummary | null;
   generation: number;
   loadError?: string;
 }
@@ -834,6 +974,19 @@ export interface DiffChangedMessage {
   skipped: SkippedPath[];
   sourceError: string | null;
   comparison: Comparison | null;
+  targets: Target[];
+  selected: TargetId | null;
+  commit: CommitSummary | null;
+  generation: number;
+}
+/** The acknowledgement of a `target.select`; the new listing follows as a
+ * `diffChanged` broadcast to every tab, the requesting one included. */
+export interface TargetSelectedMessage {
+  type: "targetSelected";
+  id: number;
+  selected: TargetId | null;
+  targets: Target[];
+  comparison: Comparison | null;
   generation: number;
 }
 
@@ -848,7 +1001,8 @@ export type ServerMessage =
   | ResolvedAddressedMessage
   | ErrorMessage
   | ReviewChangedMessage
-  | DiffChangedMessage;
+  | DiffChangedMessage
+  | TargetSelectedMessage;
 
 /** Responses that answer a request (carry the echoed `id`). */
 export type Response = Exclude<ServerMessage, HelloMessage | ReviewChangedMessage | DiffChangedMessage>;
@@ -865,6 +1019,7 @@ export const SERVER_MESSAGE_TYPES = [
   "error",
   "reviewChanged",
   "diffChanged",
+  "targetSelected",
 ] as const;
 
 function strings(v: unknown, at: string): string {
@@ -884,6 +1039,9 @@ function decodeSnapshotFields(o: JsonObject): SnapshotFields {
     sourceError: optStr(o, "sourceError") ?? null,
     skipped: arr(o, "skipped", decodeSkippedPath),
     comparison: present(o, "comparison") === undefined ? null : decodeComparison(o["comparison"]),
+    targets: arr(o, "targets", decodeTarget),
+    selected: optTargetId(o, "selected"),
+    commit: present(o, "commit") === undefined ? null : decodeCommitSummary(o["commit"]),
     generation: int(o, "generation"),
   };
   const loadError = optStr(o, "loadError");
@@ -969,6 +1127,18 @@ export function decodeServerMessage(v: unknown): ServerMessage {
         files: arr(o, "files", decodeFileEntry),
         skipped: arr(o, "skipped", decodeSkippedPath),
         sourceError: optStr(o, "sourceError") ?? null,
+        comparison: present(o, "comparison") === undefined ? null : decodeComparison(o["comparison"]),
+        targets: arr(o, "targets", decodeTarget),
+        selected: optTargetId(o, "selected"),
+        commit: present(o, "commit") === undefined ? null : decodeCommitSummary(o["commit"]),
+        generation: int(o, "generation"),
+      };
+    case "targetSelected":
+      return {
+        type,
+        id: int(o, "id"),
+        selected: optTargetId(o, "selected"),
+        targets: arr(o, "targets", decodeTarget),
         comparison: present(o, "comparison") === undefined ? null : decodeComparison(o["comparison"]),
         generation: int(o, "generation"),
       };

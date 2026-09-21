@@ -231,6 +231,38 @@ export function createDispatcher(store: Store, editor: Editor, render: () => voi
       },
     ],
 
+    ["ambidiff.target.next", (n) => store.stepTarget(n ?? 1)],
+    ["ambidiff.target.prev", (n) => store.stepTarget(-(n ?? 1))],
+    [
+      "ambidiff.target.pick",
+      () => {
+        if (!store.isStack() || store.targets.length === 0) {
+          store.setFlash("not a stack review");
+          return;
+        }
+        const items = store.targets.map((t) => {
+          const counts = store.targetCounts(t.id);
+          const position = t.position !== null ? `${t.position} ` : "  ";
+          const oid = t.tip ? t.tip.slice(0, 8) : "";
+          return {
+            label: `${position}${t.label}  ${oid}  ${t.commitCount}c  ○${counts.todo}/${counts.total}`,
+            detail: [t.subject ?? "", t.aliases.length > 0 ? `(also: ${t.aliases.join(", ")})` : ""]
+              .filter(Boolean)
+              .join("  "),
+          };
+        });
+        editor.pick({
+          title: "targets",
+          items,
+          initial: Math.max(store.targetIndex(), 0),
+          onPick: (index) => {
+            const target = store.targets[index];
+            if (target) store.selectTarget(target.id);
+          },
+        });
+      },
+    ],
+
     ["ambidiff.search.start", () => editor.search((query) => store.startSearch(query))],
     ["ambidiff.search.next", () => store.searchNext()],
     ["ambidiff.search.prev", () => store.searchPrev()],
