@@ -26,5 +26,8 @@
       "kind": "worktree"
     }
   },
+  "targets": [],
+  "selected": null,
+  "commit": null,
   "generation": 1
 }

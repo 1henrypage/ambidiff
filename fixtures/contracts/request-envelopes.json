@@ -97,6 +97,16 @@
     },
     {
       "id": 15,
+      "method": "target.select",
+      "params": {
+        "target": {
+          "kind": "branch",
+          "name": "auth-2"
+        }
+      }
+    },
+    {
+      "id": 16,
       "method": "shutdown"
     }
   ],
@@ -161,6 +171,14 @@
     {
       "type": "rev.bump",
       "id": 12
+    },
+    {
+      "type": "target.select",
+      "id": 13,
+      "target": {
+        "kind": "branch",
+        "name": "auth-2"
+      }
     }
   ]
 }

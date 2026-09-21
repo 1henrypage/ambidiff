@@ -26,6 +26,9 @@
       "kind": "worktree"
     }
   },
+  "targets": [],
+  "selected": null,
+  "commit": null,
   "methods": [
     "initialize",
     "review",
@@ -41,6 +44,7 @@
     "comment.reopen",
     "comment.resolveAddressed",
     "rev.bump",
+    "target.select",
     "shutdown"
   ]
 }

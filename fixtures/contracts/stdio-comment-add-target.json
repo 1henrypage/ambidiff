@@ -1,0 +1,17 @@
+{
+  "id": "c-2b9e4d71",
+  "rev": 1,
+  "status": "open",
+  "path": "src/session.ts",
+  "side": "new",
+  "line": 4,
+  "target": {
+    "kind": "branch",
+    "name": "auth-2"
+  },
+  "snippet": "setCookie(session)",
+  "body": "httpOnly??",
+  "author": "henry",
+  "createdAt": "2026-09-07T10:05:00Z",
+  "updatedAt": "2026-09-07T10:05:00Z"
+}

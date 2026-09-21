@@ -12,7 +12,8 @@
         "line": null,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -27,7 +28,8 @@
         "line": null,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -43,7 +45,8 @@
         "line": 3,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -60,7 +63,8 @@
         "line": 3,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -78,7 +82,8 @@
         "line": 3,
         "endLine": 5,
         "body": "b",
-        "author": "agent"
+        "author": "agent",
+        "target": null
       }
     },
     {
@@ -97,7 +102,8 @@
         "line": null,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -113,7 +119,8 @@
         "line": 4294967295,
         "endLine": null,
         "body": "b",
-        "author": null
+        "author": null,
+        "target": null
       }
     },
     {
@@ -266,6 +273,92 @@
       "error": {
         "kind": "wrongType",
         "field": ""
+      }
+    },
+    {
+      "name": "line comment with a branch target",
+      "payload": {
+        "path": "src/a.rs",
+        "line": 3,
+        "body": "b",
+        "target": {
+          "kind": "branch",
+          "name": "auth-2"
+        }
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": "new",
+        "line": 3,
+        "endLine": null,
+        "body": "b",
+        "author": null,
+        "target": {
+          "kind": "branch",
+          "name": "auth-2"
+        }
+      }
+    },
+    {
+      "name": "stack target",
+      "payload": {
+        "path": "src/a.rs",
+        "body": "b",
+        "target": {
+          "kind": "stack"
+        }
+      },
+      "ok": {
+        "path": "src/a.rs",
+        "side": null,
+        "line": null,
+        "endLine": null,
+        "body": "b",
+        "author": null,
+        "target": {
+          "kind": "stack"
+        }
+      }
+    },
+    {
+      "name": "string target is the wrong type",
+      "payload": {
+        "path": "src/a.rs",
+        "body": "b",
+        "target": "auth-2"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "target"
+      }
+    },
+    {
+      "name": "unknown target kind",
+      "payload": {
+        "path": "src/a.rs",
+        "body": "b",
+        "target": {
+          "kind": "tag",
+          "name": "v1"
+        }
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "target.kind"
+      }
+    },
+    {
+      "name": "branch target without a name",
+      "payload": {
+        "path": "src/a.rs",
+        "body": "b",
+        "target": {
+          "kind": "branch"
+        }
+      },
+      "error": {
+        "kind": "missing",
+        "field": "target.name"
       }
     }
   ]

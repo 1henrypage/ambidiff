@@ -1,0 +1,104 @@
+{
+  "selected": {
+    "kind": "branch",
+    "name": "auth-2"
+  },
+  "targets": [
+    {
+      "id": {
+        "kind": "branch",
+        "name": "auth-1"
+      },
+      "label": "auth-1",
+      "position": 1,
+      "tip": "2222222222222222222222222222222222222222",
+      "commitCount": 1,
+      "subject": "Add login form",
+      "aliases": [],
+      "comparison": {
+        "old": {
+          "kind": "commit",
+          "oid": "1111111111111111111111111111111111111111"
+        },
+        "new": {
+          "kind": "commit",
+          "oid": "2222222222222222222222222222222222222222"
+        }
+      }
+    },
+    {
+      "id": {
+        "kind": "branch",
+        "name": "auth-2"
+      },
+      "label": "auth-2",
+      "position": 2,
+      "tip": "3333333333333333333333333333333333333333",
+      "commitCount": 1,
+      "subject": "Wire the session cookie",
+      "aliases": [],
+      "comparison": {
+        "old": {
+          "kind": "commit",
+          "oid": "2222222222222222222222222222222222222222"
+        },
+        "new": {
+          "kind": "commit",
+          "oid": "3333333333333333333333333333333333333333"
+        }
+      }
+    },
+    {
+      "id": {
+        "kind": "stack"
+      },
+      "label": "stack",
+      "position": null,
+      "tip": "3333333333333333333333333333333333333333",
+      "commitCount": 2,
+      "subject": null,
+      "aliases": [],
+      "comparison": {
+        "old": {
+          "kind": "commit",
+          "oid": "1111111111111111111111111111111111111111"
+        },
+        "new": {
+          "kind": "commit",
+          "oid": "3333333333333333333333333333333333333333"
+        }
+      }
+    },
+    {
+      "id": {
+        "kind": "worktree"
+      },
+      "label": "worktree",
+      "position": null,
+      "tip": null,
+      "commitCount": 0,
+      "subject": null,
+      "aliases": [],
+      "comparison": {
+        "old": {
+          "kind": "commit",
+          "oid": "3333333333333333333333333333333333333333"
+        },
+        "new": {
+          "kind": "worktree"
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "old": {
+      "kind": "commit",
+      "oid": "2222222222222222222222222222222222222222"
+    },
+    "new": {
+      "kind": "commit",
+      "oid": "3333333333333333333333333333333333333333"
+    }
+  },
+  "generation": 2
+}

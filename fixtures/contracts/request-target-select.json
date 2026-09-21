@@ -1,0 +1,134 @@
+{
+  "shape": "target.select",
+  "cases": [
+    {
+      "name": "branch target",
+      "payload": {
+        "target": {
+          "kind": "branch",
+          "name": "auth-2"
+        }
+      },
+      "ok": {
+        "target": {
+          "kind": "branch",
+          "name": "auth-2"
+        }
+      }
+    },
+    {
+      "name": "stack target",
+      "payload": {
+        "target": {
+          "kind": "stack"
+        }
+      },
+      "ok": {
+        "target": {
+          "kind": "stack"
+        }
+      }
+    },
+    {
+      "name": "worktree target",
+      "payload": {
+        "target": {
+          "kind": "worktree"
+        }
+      },
+      "ok": {
+        "target": {
+          "kind": "worktree"
+        }
+      }
+    },
+    {
+      "name": "head target",
+      "payload": {
+        "target": {
+          "kind": "head"
+        }
+      },
+      "ok": {
+        "target": {
+          "kind": "head"
+        }
+      }
+    },
+    {
+      "name": "missing target",
+      "payload": {},
+      "error": {
+        "kind": "missing",
+        "field": "target"
+      }
+    },
+    {
+      "name": "null target is missing",
+      "payload": {
+        "target": null
+      },
+      "error": {
+        "kind": "missing",
+        "field": "target"
+      }
+    },
+    {
+      "name": "unknown kind",
+      "payload": {
+        "target": {
+          "kind": "remote"
+        }
+      },
+      "error": {
+        "kind": "unknown",
+        "field": "target.kind"
+      }
+    },
+    {
+      "name": "missing kind",
+      "payload": {
+        "target": {
+          "name": "auth-2"
+        }
+      },
+      "error": {
+        "kind": "missing",
+        "field": "target.kind"
+      }
+    },
+    {
+      "name": "numeric branch name is the wrong type",
+      "payload": {
+        "target": {
+          "kind": "branch",
+          "name": 7
+        }
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "target.name"
+      }
+    },
+    {
+      "name": "non-object target",
+      "payload": {
+        "target": "stack"
+      },
+      "error": {
+        "kind": "wrongType",
+        "field": "target"
+      }
+    },
+    {
+      "name": "array payload is not an object",
+      "payload": [
+        1
+      ],
+      "error": {
+        "kind": "wrongType",
+        "field": ""
+      }
+    }
+  ]
+}
