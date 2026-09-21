@@ -341,6 +341,7 @@ mod tests {
             side: line.map(|_| Side::New),
             line,
             end_line: None,
+            target: None,
             snippet: snippet.map(str::to_string),
             body: "b".to_string(),
             response: None,

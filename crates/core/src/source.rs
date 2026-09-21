@@ -7,10 +7,11 @@
 //! `git_source` (native-only) and `rootio` (native+unix) touch the
 //! filesystem or spawn a process.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{FileDiff, FileEntry};
-use crate::review::Side;
+use crate::review::{Side, Source};
+use crate::stack::TargetId;
 
 /// A request for one file's diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +45,7 @@ impl FileDiffRequest {
 
 /// One endpoint of a [`Comparison`]: a commit tree, the well-known empty
 /// tree (an unborn `HEAD`), the index, or the working tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Endpoint {
     Commit { oid: String },
@@ -67,7 +68,7 @@ impl std::fmt::Display for Endpoint {
 /// The two endpoints a diff is taken between, resolved once per `open`
 /// (`GitSource` re-resolves independently for `try_signature`, never
 /// mutating the cached value).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comparison {
     pub old: Endpoint,
     pub new: Endpoint,
@@ -92,6 +93,76 @@ impl Comparison {
 impl std::fmt::Display for Comparison {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.old, self.new)
+    }
+}
+
+/// How a review chooses what to compare, as recorded in the review file's
+/// `source` (or given on the command line for an unsaved review).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceMode {
+    /// Today's default: the working tree (or the index with `staged`)
+    /// against `base` (a ref or an `A..B` range), or against the index
+    /// when `base` is absent.
+    Worktree { base: Option<String>, staged: bool },
+    /// One commit: its first parent against the commit itself.
+    Commit { spec: String },
+    /// A stack of PR branches above trunk (`upstream` overrides the
+    /// auto-detected trunk).
+    Stack { upstream: Option<String> },
+}
+
+impl SourceMode {
+    pub fn is_stack(&self) -> bool {
+        matches!(self, SourceMode::Stack { .. })
+    }
+}
+
+/// What a git source is opened for: the mode plus, for a stack, the target
+/// this process is looking at (per process, never written to the review
+/// file). Equality on this value decides whether a source must be rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompareSpec {
+    pub mode: SourceMode,
+    pub target: Option<TargetId>,
+}
+
+impl CompareSpec {
+    pub fn worktree(base: Option<String>, staged: bool) -> CompareSpec {
+        CompareSpec {
+            mode: SourceMode::Worktree {
+                base: base.filter(|b| !b.is_empty()),
+                staged,
+            },
+            target: None,
+        }
+    }
+
+    pub fn commit(spec: impl Into<String>) -> CompareSpec {
+        CompareSpec {
+            mode: SourceMode::Commit { spec: spec.into() },
+            target: None,
+        }
+    }
+
+    pub fn stack(upstream: Option<String>, target: Option<TargetId>) -> CompareSpec {
+        CompareSpec {
+            mode: SourceMode::Stack {
+                upstream: upstream.filter(|u| !u.is_empty()),
+            },
+            target,
+        }
+    }
+
+    /// The spec a review file's `source` selects; `target` is kept only
+    /// for a stack (nothing else has targets to select).
+    pub fn from_source(source: &Source, target: Option<TargetId>) -> CompareSpec {
+        let mode = source.mode();
+        let target = if mode.is_stack() { target } else { None };
+        CompareSpec { mode, target }
+    }
+
+    pub fn is_stack(&self) -> bool {
+        self.mode.is_stack()
     }
 }
 
@@ -161,6 +232,19 @@ pub enum SourceError {
     TooLarge { context: String, limit_bytes: u64 },
     #[error("git {args} timed out after {seconds}s")]
     Timeout { args: String, seconds: u64 },
+    #[error(
+        "no trunk found (tried {}); pass --upstream <ref> to name the branch the stack sits on",
+        tried.join(", ")
+    )]
+    NoTrunk { tried: Vec<String> },
+    #[error("HEAD is unborn: commit something before reviewing a stack or a commit")]
+    UnbornHead,
+    #[error(
+        "nothing to review: HEAD is at {trunk} and the working tree is clean (the stack is empty)"
+    )]
+    EmptyStack { trunk: String },
+    #[error("target {target} is not in the stack")]
+    TargetNotInStack { target: String },
 }
 
 impl SourceError {

@@ -12,7 +12,10 @@
 //! - `side` must be exactly `old` or `new`; a present unknown side fails
 //!   with [`DecodeError::Unknown`], while an omitted side on a line comment
 //!   defaults to `new` (the documented rule for added and context lines);
-//! - view options default to the unified layout, word diff on, dark theme.
+//! - view options default to the unified layout, word diff on, dark theme;
+//! - a `target` is an object `{kind, name?}` whose `kind` is one of
+//!   `branch`, `head`, `stack`, `worktree`; a `branch` needs a string
+//!   `name`. Errors name the nested field (`target.kind`, `target.name`).
 //!
 //! The wire spelling of view options (`{mode, wordDiff, theme}`) is also the
 //! `opts_json` the wasm painter passes, so [`ViewOptionsWire`] is the one
@@ -24,6 +27,7 @@ use serde_json::Value;
 use crate::highlight::ThemeChoice;
 use crate::review::{NewComment, Side};
 use crate::rows::ViewMode;
+use crate::stack::TargetId;
 use crate::view::ViewOptions;
 
 /// Why a request payload was rejected. `field` names the offending key in
@@ -76,6 +80,9 @@ pub struct CommentAddRequest {
     pub end_line: Option<u32>,
     pub body: String,
     pub author: Option<String>,
+    /// The stack target the comment is made against (required for path
+    /// comments in a stack review; rejected outside one).
+    pub target: Option<TargetId>,
 }
 
 impl CommentAddRequest {
@@ -87,11 +94,18 @@ impl CommentAddRequest {
             side: self.side,
             line: self.line,
             end_line: self.end_line,
+            target: self.target,
             snippet: None,
             body: self.body,
             author,
         }
     }
+}
+
+/// Select the stack target this process looks at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetSelectRequest {
+    pub target: TargetId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +287,56 @@ fn opt_side(v: &Value, field: &str) -> Result<Option<Side>, DecodeError> {
     }
 }
 
+/// A present `{kind, name?}` target object under `field`; errors name the
+/// nested key (`<field>.kind`, `<field>.name`).
+fn opt_target_id(v: &Value, field: &str) -> Result<Option<TargetId>, DecodeError> {
+    let Some(raw) = present(v, field) else {
+        return Ok(None);
+    };
+    if !raw.is_object() {
+        return Err(DecodeError::WrongType {
+            field: field.to_string(),
+            expected: "an object {kind, name?}",
+        });
+    }
+    let kind_field = format!("{field}.kind");
+    let name_field = format!("{field}.name");
+    let kind = match present(raw, "kind") {
+        None => {
+            return Err(DecodeError::Missing { field: kind_field });
+        }
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => {
+            return Err(DecodeError::WrongType {
+                field: kind_field,
+                expected: "a string",
+            });
+        }
+    };
+    match kind {
+        "branch" => {
+            let name = match present(raw, "name") {
+                None => return Err(DecodeError::Missing { field: name_field }),
+                Some(Value::String(s)) => s.clone(),
+                Some(_) => {
+                    return Err(DecodeError::WrongType {
+                        field: name_field,
+                        expected: "a string",
+                    });
+                }
+            };
+            Ok(Some(TargetId::Branch { name }))
+        }
+        "head" => Ok(Some(TargetId::Head)),
+        "stack" => Ok(Some(TargetId::Stack)),
+        "worktree" => Ok(Some(TargetId::Worktree)),
+        other => Err(DecodeError::Unknown {
+            field: kind_field,
+            value: other.to_string(),
+        }),
+    }
+}
+
 // --------------------------------------------------------------- decoders
 
 /// Decode a `comment.add` payload. Field spelling is identical on stdio and
@@ -288,6 +352,7 @@ pub fn decode_comment_add(v: &Value) -> Result<CommentAddRequest, DecodeError> {
     let side = explicit_side.or(line.map(|_| Side::New));
     let body = req_str(v, "body")?;
     let author = opt_str(v, "author")?;
+    let target = opt_target_id(v, "target")?;
     Ok(CommentAddRequest {
         path,
         side,
@@ -295,7 +360,17 @@ pub fn decode_comment_add(v: &Value) -> Result<CommentAddRequest, DecodeError> {
         end_line,
         body,
         author,
+        target,
     })
+}
+
+/// Decode a `target.select` payload: `{target: {kind, name?}}`.
+pub fn decode_target_select(v: &Value) -> Result<TargetSelectRequest, DecodeError> {
+    object(v)?;
+    let target = opt_target_id(v, "target")?.ok_or_else(|| DecodeError::Missing {
+        field: "target".to_string(),
+    })?;
+    Ok(TargetSelectRequest { target })
 }
 
 /// Decode a `comment.edit` payload; `id_field` is `id` (stdio) or
@@ -470,6 +545,83 @@ mod tests {
             decode_comment_add(&json!([1])).is_err(),
             "non-object payload"
         );
+    }
+
+    #[test]
+    fn comment_target_decodes_every_kind_and_names_nested_fields_in_errors() {
+        let req = decode_comment_add(
+            &json!({"path": "a", "body": "b", "target": {"kind": "branch", "name": "auth-2"}}),
+        )
+        .expect("ok");
+        assert_eq!(
+            req.target,
+            Some(TargetId::Branch {
+                name: "auth-2".into()
+            })
+        );
+        for (kind, id) in [
+            ("head", TargetId::Head),
+            ("stack", TargetId::Stack),
+            ("worktree", TargetId::Worktree),
+        ] {
+            let req =
+                decode_comment_add(&json!({"body": "b", "target": {"kind": kind}})).expect("ok");
+            assert_eq!(req.target, Some(id));
+        }
+        assert_eq!(
+            decode_comment_add(&json!({"body": "b", "target": null}))
+                .expect("null is omitted")
+                .target,
+            None
+        );
+        let cases = [
+            (json!("auth-2"), "wrongType", "target"),
+            (
+                json!({"kind": "tag", "name": "v1"}),
+                "unknown",
+                "target.kind",
+            ),
+            (json!({"name": "x"}), "missing", "target.kind"),
+            (json!({"kind": 3}), "wrongType", "target.kind"),
+            (json!({"kind": "branch"}), "missing", "target.name"),
+            (
+                json!({"kind": "branch", "name": 7}),
+                "wrongType",
+                "target.name",
+            ),
+        ];
+        for (target, kind, field) in cases {
+            let err =
+                decode_comment_add(&json!({"body": "b", "target": target})).expect_err("rejected");
+            assert_eq!(err.kind(), kind, "{err}");
+            assert_eq!(err.field(), field, "{err}");
+        }
+    }
+
+    #[test]
+    fn target_select_requires_a_target_object() {
+        let req = decode_target_select(&json!({"target": {"kind": "stack"}})).expect("ok");
+        assert_eq!(req.target, TargetId::Stack);
+        assert_eq!(
+            decode_target_select(&json!({})),
+            Err(DecodeError::Missing {
+                field: "target".into()
+            })
+        );
+        assert_eq!(
+            decode_target_select(&json!({"target": null})),
+            Err(DecodeError::Missing {
+                field: "target".into()
+            })
+        );
+        assert_eq!(
+            decode_target_select(&json!({"target": {"kind": "remote"}})),
+            Err(DecodeError::Unknown {
+                field: "target.kind".into(),
+                value: "remote".into()
+            })
+        );
+        assert!(decode_target_select(&json!([])).is_err());
     }
 
     #[test]

@@ -445,6 +445,7 @@ mod tests {
             side: Some(Side::New),
             line: Some(2),
             end_line: None,
+            target: None,
             snippet: Some("B".into()),
             body: "b".into(),
             response: None,

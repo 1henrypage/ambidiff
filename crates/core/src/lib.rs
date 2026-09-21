@@ -18,6 +18,7 @@ pub mod review;
 pub mod rows;
 pub mod sanitize;
 pub mod search;
+pub mod stack;
 pub mod tree;
 pub mod util;
 pub mod view;

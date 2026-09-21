@@ -352,6 +352,7 @@ mod tests {
             side: None,
             line: None,
             end_line: None,
+            target: None,
             snippet: None,
             body: "b".to_string(),
             response: None,

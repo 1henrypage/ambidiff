@@ -239,6 +239,7 @@ pub fn comment_add(args: CommentAddArgs) -> Result<i32> {
         side,
         line: args.line,
         end_line: args.end_line,
+        target: None,
         body: args.body.clone(),
         author: args.author.clone(),
     };
@@ -698,6 +699,7 @@ mod tests {
             side: None,
             line: None,
             end_line: None,
+            target: None,
             snippet: None,
             body: "x".into(),
             response: None,

@@ -1297,6 +1297,7 @@ mod tests {
             side: None,
             line: None,
             end_line: None,
+            target: None,
             snippet: None,
             body: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi \
                 omicron pi rho sigma tau"

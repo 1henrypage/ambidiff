@@ -18,6 +18,8 @@ use serde_json::{Map, Value};
 
 use crate::lifecycle::{self, LifecycleError};
 pub use crate::lifecycle::{Action, Actor, Status};
+use crate::source::SourceMode;
+use crate::stack::TargetId;
 
 /// Schema major this build writes.
 pub const SCHEMA_MAJOR: u64 = 1;
@@ -57,23 +59,157 @@ pub enum Side {
 }
 
 /// The diff source recorded in the review file. Git is the only v1 kind;
-/// unknown kinds survive round-trips untouched.
+/// unknown kinds survive round-trips untouched. Exactly one of the mode
+/// selectors is expected: `base`/`staged` (working tree or index against
+/// a ref), `commit` (one commit against its parent), or `stack` (PR
+/// branches above trunk). When several are present, `stack` wins over
+/// `commit`, which wins over `base`; [`Source::conflict_warning`] reports
+/// the ambiguity so a frontend can show it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub staged: Option<bool>,
+    /// A commit spec (`HEAD`, `abc123`, `main~2`): review that one commit.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub commit: Option<String>,
+    /// Stacked-PR review; see [`StackSource`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stack: Option<StackSource>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The `source.stack` object: `upstream` overrides trunk auto-detection.
+/// Unknown keys inside it round-trip untouched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackSource {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub upstream: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 impl Source {
-    pub fn git(base: Option<String>) -> Self {
+    fn git_with(
+        base: Option<String>,
+        staged: Option<bool>,
+        commit: Option<String>,
+        stack: Option<StackSource>,
+    ) -> Self {
         Source {
             kind: "git".to_string(),
             base,
+            staged,
+            commit,
+            stack,
             extra: Map::new(),
+        }
+    }
+
+    pub fn git(base: Option<String>) -> Self {
+        Source::git_with(base, None, None, None)
+    }
+
+    /// Staged changes (the index) against `base`, or against `HEAD` when
+    /// `base` is absent.
+    pub fn git_staged(base: Option<String>) -> Self {
+        Source::git_with(base, Some(true), None, None)
+    }
+
+    pub fn git_commit(spec: impl Into<String>) -> Self {
+        Source::git_with(None, None, Some(spec.into()), None)
+    }
+
+    pub fn git_stack(upstream: Option<String>) -> Self {
+        Source::git_with(
+            None,
+            None,
+            None,
+            Some(StackSource {
+                upstream,
+                extra: Map::new(),
+            }),
+        )
+    }
+
+    /// The comparison mode this source selects (stack > commit > base).
+    pub fn mode(&self) -> SourceMode {
+        if let Some(stack) = &self.stack {
+            return SourceMode::Stack {
+                upstream: stack.upstream.clone().filter(|u| !u.is_empty()),
+            };
+        }
+        if let Some(spec) = self.commit.as_deref().filter(|c| !c.is_empty()) {
+            return SourceMode::Commit {
+                spec: spec.to_string(),
+            };
+        }
+        SourceMode::Worktree {
+            base: self.base.clone().filter(|b| !b.is_empty()),
+            staged: self.staged.unwrap_or(false),
+        }
+    }
+
+    pub fn is_stack(&self) -> bool {
+        self.stack.is_some()
+    }
+
+    /// A warning when more than one mode selector is present, naming the
+    /// one that wins.
+    pub fn conflict_warning(&self) -> Option<String> {
+        let mut present = Vec::new();
+        if self.stack.is_some() {
+            present.push("stack");
+        }
+        if self.commit.as_deref().is_some_and(|c| !c.is_empty()) {
+            present.push("commit");
+        }
+        if self.base.as_deref().is_some_and(|b| !b.is_empty()) {
+            present.push("base");
+        }
+        if self.staged == Some(true) && !present.contains(&"base") {
+            present.push("staged");
+        }
+        (present.len() > 1).then(|| {
+            format!(
+                "source sets {}; using {}",
+                present.join(" and "),
+                present[0]
+            )
+        })
+    }
+
+    /// One human line describing the source (`git stack`, `git commit
+    /// HEAD`, `git base main`, `git staged`, `git index..worktree`).
+    pub fn describe(&self) -> String {
+        if self.kind != "git" {
+            return self.kind.clone();
+        }
+        match self.mode() {
+            SourceMode::Stack { upstream: Some(u) } => format!("git stack (upstream {u})"),
+            SourceMode::Stack { upstream: None } => "git stack".to_string(),
+            SourceMode::Commit { spec } => format!("git commit {spec}"),
+            SourceMode::Worktree {
+                base: Some(base),
+                staged: true,
+            } => format!("git staged against {base}"),
+            SourceMode::Worktree {
+                base: None,
+                staged: true,
+            } => "git staged".to_string(),
+            SourceMode::Worktree {
+                base: Some(base),
+                staged: false,
+            } => format!("git base {base}"),
+            SourceMode::Worktree {
+                base: None,
+                staged: false,
+            } => "git index..worktree".to_string(),
         }
     }
 }
@@ -94,6 +230,11 @@ pub struct Comment {
     pub line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub end_line: Option<u32>,
+    /// The stack target (PR branch, `head`, `stack`, or `worktree`) this
+    /// comment was made against; absent outside stack reviews and on
+    /// comments older than stacks. Viewing another target hides it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target: Option<TargetId>,
     /// Source text captured at comment time; drift detection compares it
     /// whitespace-insensitively against the current line.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -214,6 +355,7 @@ impl ReviewFile {
         now: &str,
     ) -> Result<&Comment, ReviewError> {
         validate_new_comment(&new)?;
+        validate_comment_target(&new, &self.source)?;
         if self.comments.iter().any(|c| c.id == id) {
             return Err(ReviewError::DuplicateId { id });
         }
@@ -233,6 +375,7 @@ impl ReviewFile {
             side: new.side,
             line: new.line,
             end_line: new.end_line,
+            target: new.target,
             snippet: new.snippet,
             body: new.body,
             response: None,
@@ -415,6 +558,7 @@ pub struct NewComment {
     pub side: Option<Side>,
     pub line: Option<u32>,
     pub end_line: Option<u32>,
+    pub target: Option<TargetId>,
     pub snippet: Option<String>,
     pub body: String,
     pub author: String,
@@ -487,6 +631,27 @@ pub fn validate_new_comment(new: &NewComment) -> Result<(), ReviewError> {
         return fail("path must not be empty");
     }
     Ok(())
+}
+
+/// The target rule: a stack review needs every path-anchored comment to
+/// name the target it was made against (otherwise it would show up on
+/// every PR of the stack, misplaced on all but one); a non-stack review has
+/// no targets to name. Review-level comments may carry one or not. Checked
+/// by [`ReviewFile::try_add_comment`] before any mutation; deliberately
+/// NOT part of [`ReviewFile::validate`], so a legacy file whose comments
+/// predate stacks never becomes unwritable.
+pub fn validate_comment_target(new: &NewComment, source: &Source) -> Result<(), ReviewError> {
+    let fail = |msg: String| Err(ReviewError::Validation { msg });
+    match (source.is_stack(), &new.target, &new.path) {
+        (false, Some(target), _) => fail(format!(
+            "target {target} given, but this review is not a stack review"
+        )),
+        (true, None, Some(_)) => fail(
+            "a stack review needs a target for a path comment; pass --target <branch|stack|worktree|head>"
+                .to_string(),
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Result of a salvage-mode parse.
@@ -812,10 +977,269 @@ mod tests {
             side: Some(Side::New),
             line: Some(3),
             end_line: None,
+            target: None,
             snippet: Some("let x = 1;".to_string()),
             body: body.to_string(),
             author: "henry".to_string(),
         }
+    }
+
+    fn stack_file() -> ReviewFile {
+        ReviewFile::new(
+            "stack-review".to_string(),
+            Source::git_stack(Some("origin/main".to_string())),
+            "2026-01-01T00:00:00Z",
+        )
+    }
+
+    fn branch(name: &str) -> TargetId {
+        TargetId::Branch {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn source_shapes_round_trip_and_describe_themselves() {
+        let cases: Vec<(Source, serde_json::Value, SourceMode, &str)> = vec![
+            (
+                Source::git(None),
+                serde_json::json!({"kind": "git"}),
+                SourceMode::Worktree {
+                    base: None,
+                    staged: false,
+                },
+                "git index..worktree",
+            ),
+            (
+                Source::git(Some("main".into())),
+                serde_json::json!({"kind": "git", "base": "main"}),
+                SourceMode::Worktree {
+                    base: Some("main".into()),
+                    staged: false,
+                },
+                "git base main",
+            ),
+            (
+                Source::git_staged(None),
+                serde_json::json!({"kind": "git", "staged": true}),
+                SourceMode::Worktree {
+                    base: None,
+                    staged: true,
+                },
+                "git staged",
+            ),
+            (
+                Source::git_commit("HEAD"),
+                serde_json::json!({"kind": "git", "commit": "HEAD"}),
+                SourceMode::Commit {
+                    spec: "HEAD".into(),
+                },
+                "git commit HEAD",
+            ),
+            (
+                Source::git_stack(None),
+                serde_json::json!({"kind": "git", "stack": {}}),
+                SourceMode::Stack { upstream: None },
+                "git stack",
+            ),
+            (
+                Source::git_stack(Some("origin/main".into())),
+                serde_json::json!({"kind": "git", "stack": {"upstream": "origin/main"}}),
+                SourceMode::Stack {
+                    upstream: Some("origin/main".into()),
+                },
+                "git stack (upstream origin/main)",
+            ),
+        ];
+        for (source, json, mode, described) in cases {
+            assert_eq!(serde_json::to_value(&source).expect("json"), json);
+            let back: Source = serde_json::from_value(json).expect("parse");
+            assert_eq!(back, source);
+            assert_eq!(source.mode(), mode);
+            assert_eq!(source.describe(), described);
+            assert_eq!(source.conflict_warning(), None);
+        }
+    }
+
+    #[test]
+    fn source_precedence_is_stack_then_commit_then_base_with_a_warning() {
+        let all: Source = serde_json::from_value(serde_json::json!({
+            "kind": "git", "base": "main", "commit": "HEAD", "stack": {}
+        }))
+        .expect("parse");
+        assert!(all.mode().is_stack());
+        assert_eq!(
+            all.conflict_warning().as_deref(),
+            Some("source sets stack and commit and base; using stack")
+        );
+        let commit_and_base: Source = serde_json::from_value(serde_json::json!({
+            "kind": "git", "base": "main", "commit": "HEAD"
+        }))
+        .expect("parse");
+        assert_eq!(
+            commit_and_base.mode(),
+            SourceMode::Commit {
+                spec: "HEAD".into()
+            }
+        );
+        assert_eq!(
+            commit_and_base.conflict_warning().as_deref(),
+            Some("source sets commit and base; using commit")
+        );
+        let staged_and_commit: Source = serde_json::from_value(serde_json::json!({
+            "kind": "git", "staged": true, "commit": "HEAD"
+        }))
+        .expect("parse");
+        assert_eq!(
+            staged_and_commit.conflict_warning().as_deref(),
+            Some("source sets commit and staged; using commit")
+        );
+    }
+
+    #[test]
+    fn wrong_typed_source_selector_is_retained_and_read_only() {
+        let json = r#"{
+          "ambidiff": 1, "review": "r", "revision": 1,
+          "source": {"kind": "git", "staged": "yes"},
+          "createdAt": "t", "updatedAt": "t", "comments": []
+        }"#;
+        let outcome = parse_review(json).expect("parse");
+        assert!(outcome.read_only, "{:?}", outcome.warnings);
+        assert!(outcome.retained.contains_key("source"));
+        assert_eq!(outcome.review.source, Source::git(None));
+        let json = r#"{
+          "ambidiff": 1, "review": "r", "revision": 1,
+          "source": {"kind": "git", "stack": "origin/main"},
+          "createdAt": "t", "updatedAt": "t", "comments": []
+        }"#;
+        assert!(parse_review(json).expect("parse").read_only);
+    }
+
+    #[test]
+    fn unknown_keys_inside_stack_round_trip_and_older_files_parse_clean() {
+        let json = r#"{
+          "ambidiff": 1, "review": "r", "revision": 1,
+          "source": {"kind": "git", "stack": {"upstream": "origin/main", "tool": "git-stack"}},
+          "createdAt": "t", "updatedAt": "t", "comments": []
+        }"#;
+        let outcome = parse_review(json).expect("parse");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let out = to_json(&outcome.review).expect("serialize");
+        assert!(out.contains("\"tool\": \"git-stack\""), "{out}");
+
+        // A file written by a pre-stack build: `staged` was an untyped extra.
+        let legacy = r#"{
+          "ambidiff": 1, "review": "r", "revision": 1,
+          "source": {"kind": "git", "base": "main", "staged": true},
+          "createdAt": "t", "updatedAt": "t", "comments": []
+        }"#;
+        let outcome = parse_review(legacy).expect("parse");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(outcome.review.source.staged, Some(true));
+        assert!(outcome.review.source.extra.is_empty());
+        assert_eq!(
+            serde_json::to_value(&outcome.review.source).expect("json"),
+            serde_json::json!({"kind": "git", "base": "main", "staged": true}),
+            "same bytes on disk"
+        );
+    }
+
+    #[test]
+    fn comment_target_round_trips_and_is_omitted_when_absent() {
+        let mut review = stack_file();
+        let mut new = new_comment("tagged");
+        new.target = Some(branch("auth-2"));
+        review
+            .try_add_comment(new, "c-0001".into(), "t")
+            .expect("add tagged comment");
+        let json = to_json(&review).expect("serialize");
+        assert!(
+            json.contains("\"target\": {\n        \"kind\": \"branch\",\n        \"name\": \"auth-2\"\n      }"),
+            "{json}"
+        );
+        let outcome = parse_review(&json).expect("parse");
+        assert_eq!(outcome.review, review);
+        assert_eq!(outcome.review.comments[0].target, Some(branch("auth-2")));
+
+        let mut plain = base_file();
+        plain
+            .try_add_comment(new_comment("plain"), "c-0002".into(), "t")
+            .expect("add plain comment");
+        let json = to_json(&plain).expect("serialize");
+        assert!(!json.contains("target"), "{json}");
+    }
+
+    #[test]
+    fn malformed_comment_target_quarantines_the_record() {
+        let json = r#"{
+          "ambidiff": 1, "review": "r", "revision": 1, "source": {"kind": "git", "stack": {}},
+          "createdAt": "t", "updatedAt": "t",
+          "comments": [
+            {"id": "c-1", "rev": 1, "status": "open", "path": "a", "line": null,
+             "target": "auth-2", "body": "b", "author": "a", "createdAt": "t", "updatedAt": "t"},
+            {"id": "c-2", "rev": 1, "status": "open", "path": "a", "line": null,
+             "target": {"kind": "tag", "name": "v1"}, "body": "b", "author": "a", "createdAt": "t", "updatedAt": "t"},
+            {"id": "c-3", "rev": 1, "status": "open", "path": "a", "line": null,
+             "target": {"kind": "stack"}, "body": "b", "author": "a", "createdAt": "t", "updatedAt": "t"}
+          ]
+        }"#;
+        let outcome = parse_review(json).expect("parse");
+        assert_eq!(outcome.review.comments.len(), 1);
+        assert_eq!(outcome.review.comments[0].id, "c-3");
+        assert_eq!(outcome.review.comments[0].target, Some(TargetId::Stack));
+        assert_eq!(outcome.review.quarantined.len(), 2);
+        assert!(!outcome.read_only);
+    }
+
+    #[test]
+    fn comment_target_validation_table() {
+        let stack = Source::git_stack(None);
+        let plain = Source::git(Some("main".into()));
+        let mut path_with_target = new_comment("x");
+        path_with_target.target = Some(branch("auth-1"));
+        let path_without_target = new_comment("x");
+        let mut review_with_target = new_comment("x");
+        review_with_target.path = None;
+        review_with_target.line = None;
+        review_with_target.side = None;
+        review_with_target.target = Some(TargetId::Stack);
+        let mut review_without_target = review_with_target.clone();
+        review_without_target.target = None;
+
+        let ok = |new: &NewComment, source: &Source| validate_comment_target(new, source).is_ok();
+        // Stack review: path comments need a target; review-level are free.
+        assert!(ok(&path_with_target, &stack));
+        assert!(!ok(&path_without_target, &stack));
+        assert!(ok(&review_with_target, &stack));
+        assert!(ok(&review_without_target, &stack));
+        // Plain review: no target anywhere.
+        assert!(!ok(&path_with_target, &plain));
+        assert!(ok(&path_without_target, &plain));
+        assert!(!ok(&review_with_target, &plain));
+        assert!(ok(&review_without_target, &plain));
+
+        let err = validate_comment_target(&path_without_target, &stack).expect_err("rejected");
+        assert!(err.to_string().contains("--target"), "{err}");
+        let err = validate_comment_target(&path_with_target, &plain).expect_err("rejected");
+        assert!(err.to_string().contains("not a stack review"), "{err}");
+    }
+
+    #[test]
+    fn try_add_comment_rejects_a_bad_target_without_mutating() {
+        let mut review = stack_file();
+        let before = review.clone();
+        let err = review
+            .try_add_comment(new_comment("untargeted"), "c-0001".into(), "t")
+            .expect_err("rejected");
+        assert!(matches!(err, ReviewError::Validation { .. }));
+        assert_eq!(review, before);
+
+        let mut plain = base_file();
+        let before = plain.clone();
+        let mut tagged = new_comment("tagged");
+        tagged.target = Some(TargetId::Worktree);
+        assert!(plain.try_add_comment(tagged, "c-0002".into(), "t").is_err());
+        assert_eq!(plain, before);
     }
 
     #[test]

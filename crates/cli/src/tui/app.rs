@@ -1583,6 +1583,7 @@ impl App {
                     side: *side,
                     line: *line,
                     end_line: None,
+                    target: None,
                     body: text,
                     author: None,
                 }),
@@ -1744,6 +1745,7 @@ mod tests {
             side: None,
             line: None,
             end_line: None,
+            target: None,
             snippet: None,
             body: body.to_string(),
             response: response.map(str::to_string),
@@ -1883,6 +1885,7 @@ mod tests {
                 side: None,
                 line: None,
                 end_line: None,
+                target: None,
                 body: body.to_string(),
                 author: None,
             }))

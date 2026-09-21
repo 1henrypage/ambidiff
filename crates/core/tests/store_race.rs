@@ -30,6 +30,7 @@ fn add_round(store: &Store, author: &str, i: usize) {
                 side: Some(Side::New),
                 line: Some(1),
                 end_line: None,
+                target: None,
                 snippet: None,
                 body: format!("{author} round {i}"),
                 author: author.to_string(),

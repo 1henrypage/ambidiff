@@ -194,6 +194,7 @@ fn arb_comment() -> impl Strategy<Value = Comment> {
                     side,
                     line,
                     end_line,
+                    target: None,
                     snippet,
                     body,
                     response,
