@@ -1239,12 +1239,7 @@ fn discover(
 ) -> Result<Stack, SourceError> {
     let (trunk, trunk_oid) = resolve_trunk(root, git, upstream, deadline)?;
     let head = resolve_head(root, git, deadline)?;
-    let base = merge_base(root, git, &trunk_oid, &head, deadline)?.ok_or_else(|| {
-        SourceError::NoMergeBase {
-            left: trunk.clone(),
-            right: "HEAD".to_string(),
-        }
-    })?;
+    let base = required_merge_base(root, git, &trunk_oid, &head, (&trunk, "HEAD"), deadline)?;
 
     // `-z` with a tformat: every record is `<oid>NUL<subject>NUL`.
     let range = format!("{base}..{head}");
@@ -1372,13 +1367,14 @@ fn resolve_comparison(
                 let right_text = if r.is_empty() { "HEAD" } else { r };
                 let left_oid = resolve_ref(root, git, left_text, deadline)?;
                 let right_oid = resolve_ref(root, git, right_text, deadline)?;
-                let base_oid =
-                    merge_base(root, git, &left_oid, &right_oid, deadline)?.ok_or_else(|| {
-                        SourceError::NoMergeBase {
-                            left: left_text.to_string(),
-                            right: right_text.to_string(),
-                        }
-                    })?;
+                let base_oid = required_merge_base(
+                    root,
+                    git,
+                    &left_oid,
+                    &right_oid,
+                    (left_text, right_text),
+                    deadline,
+                )?;
                 Ok(Comparison {
                     old: Endpoint::Commit { oid: base_oid },
                     new: Endpoint::Commit { oid: right_oid },
@@ -1463,6 +1459,24 @@ fn merge_base(
     })
 }
 
+/// The merge base two resolved commits must share, named by the specs the
+/// user gave (`left`/`right` labels) in the [`SourceError::NoMergeBase`]
+/// raised when their histories are unrelated. Every other failure passes
+/// through untouched.
+fn required_merge_base(
+    root: &Path,
+    git: &Path,
+    left_oid: &str,
+    right_oid: &str,
+    labels: (&str, &str),
+    deadline: Duration,
+) -> Result<String, SourceError> {
+    merge_base(root, git, left_oid, right_oid, deadline)?.ok_or_else(|| SourceError::NoMergeBase {
+        left: labels.0.to_string(),
+        right: labels.1.to_string(),
+    })
+}
+
 /// This checkout's `HEAD` commit; an unborn branch is the typed
 /// [`SourceError::UnbornHead`] rather than an invalid-ref error about a
 /// ref the user never typed. With `cwd = root`, a linked worktree resolves
@@ -1490,23 +1504,21 @@ fn resolve_branch_base(
 ) -> Result<Endpoint, SourceError> {
     let base_oid = resolve_ref(root, git, spec, deadline)?;
     let head = resolve_head(root, git, deadline)?;
-    let oid = merge_base(root, git, &base_oid, &head, deadline)?.ok_or_else(|| {
-        SourceError::NoMergeBase {
-            left: spec.to_string(),
-            right: "HEAD".to_string(),
-        }
-    })?;
+    let oid = required_merge_base(root, git, &base_oid, &head, (spec, "HEAD"), deadline)?;
     Ok(Endpoint::Commit { oid })
 }
 
+/// `HEAD` as an endpoint, or the empty tree when it is unborn: the one
+/// place an unborn `HEAD` is a valid old side (`git diff --cached` on a
+/// fresh repository) rather than an error.
 fn resolve_head_or_empty_tree(
     root: &Path,
     git: &Path,
     deadline: Duration,
 ) -> Result<Endpoint, SourceError> {
-    match resolve_ref(root, git, "HEAD", deadline) {
+    match resolve_head(root, git, deadline) {
         Ok(oid) => Ok(Endpoint::Commit { oid }),
-        Err(SourceError::InvalidRef { .. }) => Ok(Endpoint::EmptyTree {
+        Err(SourceError::UnbornHead) => Ok(Endpoint::EmptyTree {
             oid: empty_tree_oid(root, git, deadline)?,
         }),
         Err(e) => Err(e),
