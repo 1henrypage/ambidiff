@@ -66,8 +66,10 @@ impl std::fmt::Display for Endpoint {
 }
 
 /// The two endpoints a diff is taken between, resolved once per `open`
-/// (`GitSource` re-resolves independently for `try_signature`, never
-/// mutating the cached value).
+/// and pinned for that handle's life (`GitSource` re-resolves independently
+/// for `try_signature` and `resolve_current`, never mutating the pinned
+/// value; the application opens a fresh handle when the live resolution
+/// moves).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comparison {
     pub old: Endpoint,
@@ -110,8 +112,10 @@ pub struct CommitSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceMode {
     /// Today's default: the working tree (or the index with `staged`)
-    /// against `base` (a ref or an `A..B` range), or against the index
-    /// when `base` is absent.
+    /// against `base`, or against the index when `base` is absent. A plain
+    /// ref means `merge-base(ref, HEAD)`: the branch's own commits plus
+    /// local changes. `A..B` and `A...B` keep their git meanings and never
+    /// involve the working tree.
     Worktree { base: Option<String>, staged: bool },
     /// One commit: its first parent against the commit itself.
     Commit { spec: String },
@@ -231,7 +235,9 @@ pub enum SourceError {
     },
     #[error("invalid ref: {spec}")]
     InvalidRef { spec: String },
-    #[error("no merge base between {left} and {right}")]
+    #[error(
+        "no merge base between {left} and {right}: a branch review needs shared history; pick the ref this branch was forked from, or use A..B to compare two commits directly"
+    )]
     NoMergeBase { left: String, right: String },
     #[error("unsupported comparison {base}: {reason}")]
     UnsupportedComparison { base: String, reason: String },
@@ -246,7 +252,9 @@ pub enum SourceError {
         tried.join(", ")
     )]
     NoTrunk { tried: Vec<String> },
-    #[error("HEAD is unborn: commit something before reviewing a stack or a commit")]
+    #[error(
+        "HEAD is unborn: commit something first (a branch, stack, or commit review needs a commit on HEAD)"
+    )]
     UnbornHead,
     #[error(
         "nothing to review: HEAD is at {trunk} and the working tree is clean (the stack is empty)"

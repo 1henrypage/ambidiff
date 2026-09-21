@@ -86,8 +86,11 @@ the wasm parity test can hold it still.
 - Comparison model: a git source resolves its two endpoints once (`Comparison`
   of `Endpoint::{Commit, EmptyTree, Index, Worktree}`) and every listing,
   patch, snippet, and gap read uses those endpoints; never re-derive them
-  per operation. Reads of review-root files go through `rootio` (root
-  scoped, no escaping symlinks).
+  per operation. A plain base ref pins `merge-base(ref, HEAD)` as the old
+  endpoint, never the ref's tip (`A..B` / `A...B` keep their git meanings);
+  the application re-opens the source when a dirty load finds the live
+  resolution differs from the pin. Reads of review-root files go through
+  `rootio` (root scoped, no escaping symlinks).
 - Lifecycle: open -> addressed (agent) -> resolved | reopened (HUMAN ONLY).
   Transitions are id-keyed; renames never gate lifecycle.
 - Side rule everywhere: removed lines anchor old-side numbers; added and

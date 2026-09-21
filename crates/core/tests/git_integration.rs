@@ -10,7 +10,9 @@ use std::process::Command;
 use ambidiff_core::git_source::GitSource;
 use ambidiff_core::model::{FileDiffKind, FileStatus, LineKind};
 use ambidiff_core::review::Side;
-use ambidiff_core::source::{DiffSource, Endpoint, FileDiffRequest, SkipReason, SourceError};
+use ambidiff_core::source::{
+    Comparison, DiffSource, Endpoint, FileDiffRequest, SkipReason, SourceError,
+};
 
 fn git(root: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -844,6 +846,309 @@ fn staged_with_a_base_ref_compares_the_ref_with_the_index() {
     assert!(
         matches!(err, SourceError::UnsupportedComparison { .. }),
         "staged + range is refused: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Branch reviews: a plain base ref means merge-base(ref, HEAD)
+// ---------------------------------------------------------------------
+
+/// `B - U1 - U2 (main)` in `root`, `B - F (feature)` checked out in the
+/// linked worktree `wt`: the shape of a feature branch whose base moved on
+/// after the fork. `merge_base` is `B`, as git itself reports it from the
+/// worktree.
+struct BranchScenario {
+    _repo_dir: tempfile::TempDir,
+    root: PathBuf,
+    _wt_parent: tempfile::TempDir,
+    wt: PathBuf,
+    merge_base: String,
+}
+
+fn branch_scenario() -> BranchScenario {
+    let (repo_dir, root) = repo(&[
+        ("shared.txt", "shared v1\n"),
+        ("feature.txt", "feature v1\n"),
+    ]);
+    let wt_parent = tempfile::tempdir().expect("tempdir");
+    let wt = wt_parent.path().join("wt");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().expect("utf8 path"),
+        ],
+    );
+    write(&wt, "feature.txt", "feature v2\n");
+    git(&wt, &["commit", "-qam", "F: feature edit"]);
+
+    write(&root, "upstream_1.txt", "u1\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "U1: add upstream_1"]);
+    write(&root, "upstream_2.txt", "u2\n");
+    write(&root, "shared.txt", "shared v2\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "U2: add upstream_2, edit shared"]);
+
+    let merge_base = git_out(&wt, &["merge-base", "main", "HEAD"]);
+    assert_eq!(merge_base, oid_of(&root, "main~2"), "the fork point is B");
+    BranchScenario {
+        _repo_dir: repo_dir,
+        root,
+        _wt_parent: wt_parent,
+        wt,
+        merge_base,
+    }
+}
+
+fn paths_of(source: &GitSource) -> Vec<String> {
+    source
+        .listing()
+        .expect("listing")
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect()
+}
+
+fn added_lines(source: &GitSource, entry: &ambidiff_core::model::FileEntry) -> Vec<String> {
+    let diff = source
+        .file_diff(&FileDiffRequest::for_entry(entry, 3))
+        .expect("diff");
+    diff.hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .filter(|l| l.kind == LineKind::Add)
+        .map(|l| l.content.clone())
+        .collect()
+}
+
+#[test]
+fn plain_base_in_a_linked_worktree_reviews_the_branch_from_its_merge_base() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    assert_eq!(
+        *source.comparison(),
+        Comparison {
+            old: Endpoint::Commit {
+                oid: s.merge_base.clone()
+            },
+            new: Endpoint::Worktree,
+        },
+        "old side is the fork point, not main's tip"
+    );
+    let entries = source.listing().expect("listing").entries;
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["feature.txt"],
+        "upstream commits never appear as deletions and shared.txt is untouched on the branch"
+    );
+    let entry = entry_for(&entries, "feature.txt");
+    assert_eq!(entry.status, FileStatus::Modified);
+    assert_eq!(added_lines(&source, entry), vec!["feature v2"]);
+}
+
+#[test]
+fn plain_base_branch_review_includes_staged_unstaged_and_untracked_changes() {
+    let s = branch_scenario();
+    write(&s.wt, "staged.txt", "staged\n");
+    git(&s.wt, &["add", "staged.txt"]);
+    write(&s.wt, "feature.txt", "feature v3 unstaged\n");
+    write(&s.wt, "loose.txt", "loose\n");
+
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let entries = source.listing().expect("listing").entries;
+    let shape: Vec<(&str, FileStatus)> = entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.status))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("feature.txt", FileStatus::Modified),
+            ("loose.txt", FileStatus::Untracked),
+            ("staged.txt", FileStatus::Added),
+        ]
+    );
+    assert_eq!(
+        added_lines(&source, entry_for(&entries, "feature.txt")),
+        vec!["feature v3 unstaged"],
+        "the working tree is the new side"
+    );
+}
+
+#[test]
+fn plain_base_with_staged_pins_the_merge_base_and_the_index() {
+    let s = branch_scenario();
+    write(&s.wt, "feature.txt", "feature v3 staged\n");
+    git(&s.wt, &["add", "feature.txt"]);
+    write(&s.wt, "feature.txt", "feature v4 unstaged\n");
+
+    let source = GitSource::open(&s.wt, Some("main".into()), true).expect("open");
+    assert_eq!(
+        *source.comparison(),
+        Comparison {
+            old: Endpoint::Commit {
+                oid: s.merge_base.clone()
+            },
+            new: Endpoint::Index,
+        }
+    );
+    assert_eq!(paths_of(&source), vec!["feature.txt"]);
+    assert_eq!(
+        source
+            .read_side(Side::New, "feature.txt")
+            .expect("read")
+            .as_deref(),
+        Some("feature v3 staged\n"),
+        "the new side is the index, not the unstaged edit"
+    );
+    assert_eq!(
+        source
+            .read_side(Side::Old, "feature.txt")
+            .expect("read")
+            .as_deref(),
+        Some("feature v1\n"),
+        "the old side is the fork point"
+    );
+}
+
+#[test]
+fn advancing_the_base_branch_leaves_the_branch_review_unchanged() {
+    let s = branch_scenario();
+    let first = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let comparison = first.comparison().clone();
+    let listing = first.listing().expect("listing");
+
+    write(&s.root, "upstream_3.txt", "u3\n");
+    git(&s.root, &["add", "-A"]);
+    git(&s.root, &["commit", "-qm", "U3"]);
+    write(&s.root, "feature.txt", "feature edited upstream too\n");
+    git(&s.root, &["commit", "-qam", "U4: edit feature.txt on main"]);
+
+    let second = GitSource::open(&s.wt, Some("main".into()), false).expect("open again");
+    assert_eq!(
+        *second.comparison(),
+        comparison,
+        "the fork point did not move"
+    );
+    assert_eq!(
+        second.listing().expect("listing"),
+        listing,
+        "what main did since the fork is not this branch's diff"
+    );
+}
+
+#[test]
+fn explicit_ranges_keep_their_git_meanings_beside_a_plain_base() {
+    let s = branch_scenario();
+    let main_tip = oid_of(&s.root, "main");
+    let feature_tip = oid_of(&s.wt, "feature");
+
+    let two_dot = GitSource::open(&s.wt, Some("main..feature".into()), false).expect("A..B");
+    assert_eq!(
+        *two_dot.comparison(),
+        Comparison {
+            old: Endpoint::Commit {
+                oid: main_tip.clone()
+            },
+            new: Endpoint::Commit {
+                oid: feature_tip.clone()
+            },
+        },
+        "A..B is the two tips"
+    );
+    let entries = two_dot.listing().expect("listing").entries;
+    assert_eq!(
+        entry_for(&entries, "upstream_1.txt").status,
+        FileStatus::Deleted,
+        "against main's tip the upstream files are deletions, as git diff reports"
+    );
+
+    let three_dot = GitSource::open(&s.wt, Some("main...feature".into()), false).expect("A...B");
+    assert_eq!(
+        *three_dot.comparison(),
+        Comparison {
+            old: Endpoint::Commit {
+                oid: s.merge_base.clone()
+            },
+            new: Endpoint::Commit { oid: feature_tip },
+        },
+        "A...B is B against its merge base with A"
+    );
+    assert_eq!(paths_of(&three_dot), vec!["feature.txt"]);
+
+    let plain = GitSource::open(&s.wt, Some("main".into()), false).expect("plain");
+    assert_eq!(
+        plain.comparison().old,
+        Endpoint::Commit {
+            oid: s.merge_base.clone()
+        }
+    );
+
+    // From the main checkout an ancestor ref is its own merge base, so a
+    // plain `HEAD` (or `HEAD~1`, or a tag on the branch) means what it
+    // always did.
+    let head = GitSource::open(&s.root, Some("HEAD".into()), false).expect("HEAD");
+    assert_eq!(head.comparison().old, Endpoint::Commit { oid: main_tip });
+    let parent = GitSource::open(&s.root, Some("HEAD~1".into()), false).expect("HEAD~1");
+    assert_eq!(
+        parent.comparison().old,
+        Endpoint::Commit {
+            oid: oid_of(&s.root, "HEAD~1")
+        }
+    );
+}
+
+#[test]
+fn plain_base_without_shared_history_is_an_explicit_error() {
+    let (_dir, root) = repo(&[("f.txt", "x\n")]);
+    git(&root, &["checkout", "-q", "--orphan", "island"]);
+    write(&root, "f.txt", "island\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "unrelated root"]);
+
+    for staged in [false, true] {
+        let err = GitSource::open(&root, Some("main".into()), staged)
+            .expect_err("unrelated histories have no merge base");
+        assert!(
+            err.to_string().contains("shared history"),
+            "the message explains what a branch review needs: {err}"
+        );
+        match err {
+            SourceError::NoMergeBase { left, right } => {
+                assert_eq!((left.as_str(), right.as_str()), ("main", "HEAD"));
+            }
+            other => panic!("expected NoMergeBase (staged={staged}), got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn plain_base_on_an_unborn_head_is_an_explicit_error() {
+    let (_dir, root) = repo(&[("f.txt", "x\n")]);
+    git(&root, &["checkout", "-q", "--orphan", "fresh"]);
+    // The index still holds f.txt; HEAD points at a branch with no commit.
+    for staged in [false, true] {
+        let err = GitSource::open(&root, Some("main".into()), staged)
+            .expect_err("an unborn HEAD has no fork point");
+        assert!(
+            matches!(err, SourceError::UnbornHead),
+            "staged={staged}: {err:?}"
+        );
+    }
+    let no_base = GitSource::open(&root, None, false).expect("index vs worktree needs no HEAD");
+    assert_eq!(
+        *no_base.comparison(),
+        Comparison {
+            old: Endpoint::Index,
+            new: Endpoint::Worktree,
+        }
     );
 }
 

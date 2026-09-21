@@ -43,8 +43,11 @@ pub struct InitArgs {
     /// Review name (defaults to the directory name)
     #[arg(long)]
     pub review: Option<String>,
-    /// Git base to diff against (a ref like "main", or a range "A..B");
-    /// omitted means working tree vs index
+    /// What to review: a ref like "main" reviews the current branch from
+    /// its merge base with that ref (branch commits plus staged, unstaged
+    /// and untracked changes); "A..B" compares two commits; "A...B"
+    /// compares B with its merge base with A; omitted means working tree
+    /// vs index
     #[arg(long)]
     pub base: Option<String>,
     /// Review staged changes only

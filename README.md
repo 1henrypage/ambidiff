@@ -12,7 +12,7 @@ in your viewer, live.
 
 ```sh
 cd my-worktree
-ambidiff init --base main     # start a review of this tree against main
+ambidiff init --base main     # review this branch from its merge base with main, plus local changes
 ambidiff agent-setup          # brief agents via AGENTS.md / CLAUDE.md
 ambidiff                      # open the TUI and leave comments
 ```

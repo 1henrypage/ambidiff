@@ -9,14 +9,18 @@
 //! populate regardless of user config. A numstat preflight, plus a raw-byte
 //! budget on the patch text itself, skips diffs that would swamp the
 //! viewer. The comparison (which two endpoints a diff is taken between) is
-//! resolved once per [`GitSource::open_with`] and cached; [`GitSource::try_signature`]
-//! re-resolves independently, without disturbing that cache, so watch
-//! polling reacts to a moved `HEAD` even though the open session's own view
-//! stays stable for its lifetime.
+//! resolved once per [`GitSource::open_with`] and pinned for the life of
+//! the handle; [`GitSource::try_signature`] and [`GitSource::resolve_current`]
+//! re-resolve independently, without disturbing that pin, so watch polling
+//! reacts to a moved `HEAD` or merge base, and the application re-opens
+//! the source (a fresh pin) when a dirty load finds the live resolution
+//! differs from the pinned one.
 //!
 //! Three comparison modes share this one resolver ([`CompareSpec`]): the
-//! working tree or index against a base, one commit against its first
-//! parent, and a stack of PR branches above trunk. Stack discovery is a
+//! working tree or index against a base (a plain ref pins
+//! `merge-base(ref, HEAD)` as the old endpoint, never the ref's tip; the
+//! `A..B` and `A...B` ranges keep their git meanings), one commit against
+//! its first parent, and a stack of PR branches above trunk. Stack discovery is a
 //! fixed set of plumbing calls (trunk, `HEAD`, merge-base, the first-parent
 //! chain with subjects, local branch tips, the checked-out branch, and
 //! whether the tree is dirty) whose facts `stack::assemble_stack` turns into
@@ -126,8 +130,10 @@ pub struct GitSource {
 impl GitSource {
     /// Open a git-backed source for a working-tree comparison: `None`
     /// diffs the working tree against the index; `Some("REF")` diffs the
-    /// working tree against REF; `Some("A..B")` / `Some("A...B")` diff
-    /// ranges; `staged` swaps the working tree for the index. A thin
+    /// working tree against `merge-base(REF, HEAD)` (the branch's own
+    /// commits plus local changes, never what landed on REF since the
+    /// fork); `Some("A..B")` / `Some("A...B")` diff ranges with their git
+    /// meanings; `staged` swaps the working tree for the index. A thin
     /// wrapper over [`GitSource::open_with`].
     pub fn open(
         root: impl Into<PathBuf>,
@@ -1144,12 +1150,8 @@ fn discover(
     deadline: Duration,
 ) -> Result<Stack, SourceError> {
     let (trunk, trunk_oid) = resolve_trunk(root, git, upstream, deadline)?;
-    let head = match resolve_ref(root, git, "HEAD", deadline) {
-        Ok(oid) => oid,
-        Err(SourceError::InvalidRef { .. }) => return Err(SourceError::UnbornHead),
-        Err(e) => return Err(e),
-    };
-    let base = merge_base(root, git, &trunk_oid, &head, deadline).map_err(|_| {
+    let head = resolve_head(root, git, deadline)?;
+    let base = merge_base(root, git, &trunk_oid, &head, deadline)?.ok_or_else(|| {
         SourceError::NoMergeBase {
             left: trunk.clone(),
             right: "HEAD".to_string(),
@@ -1232,6 +1234,13 @@ fn discover(
     }))
 }
 
+/// Resolve a working-tree comparison. A plain ref is a branch review: the
+/// old side is `merge-base(ref, HEAD)` (see [`resolve_branch_base`]), the
+/// new side the working tree, or the index with `staged`. `A..B` and
+/// `A...B` keep their git meanings (two commits; B against its merge base
+/// with A) and never involve the working tree. No base means the index
+/// against the working tree, or `HEAD` (the empty tree when unborn)
+/// against the index with `staged`.
 fn resolve_comparison(
     root: &Path,
     git: &Path,
@@ -1252,9 +1261,7 @@ fn resolve_comparison(
                     reason: "a staged comparison compares one ref with the index; a range has no index side".into(),
                 });
             }
-            Some(spec) => Endpoint::Commit {
-                oid: resolve_ref(root, git, spec, deadline)?,
-            },
+            Some(spec) => resolve_branch_base(root, git, spec, deadline)?,
         };
         return Ok(Comparison {
             old,
@@ -1273,7 +1280,7 @@ fn resolve_comparison(
                 let left_oid = resolve_ref(root, git, left_text, deadline)?;
                 let right_oid = resolve_ref(root, git, right_text, deadline)?;
                 let base_oid =
-                    merge_base(root, git, &left_oid, &right_oid, deadline).map_err(|_| {
+                    merge_base(root, git, &left_oid, &right_oid, deadline)?.ok_or_else(|| {
                         SourceError::NoMergeBase {
                             left: left_text.to_string(),
                             right: right_text.to_string(),
@@ -1293,9 +1300,8 @@ fn resolve_comparison(
                     new: Endpoint::Commit { oid: right_oid },
                 })
             } else {
-                let oid = resolve_ref(root, git, spec, deadline)?;
                 Ok(Comparison {
-                    old: Endpoint::Commit { oid },
+                    old: resolve_branch_base(root, git, spec, deadline)?,
                     new: Endpoint::Worktree,
                 })
             }
@@ -1334,22 +1340,70 @@ fn resolve_ref(
     }
 }
 
+/// The merge base of two commits: `Ok(None)` when their histories are
+/// unrelated (git exits 1 with nothing on stdout), `Err` for anything else
+/// (a bad ref exits 128; a deadline kill is a `Timeout`), so a caller
+/// never relabels a failure as "no merge base".
 fn merge_base(
     root: &Path,
     git: &Path,
     left: &str,
     right: &str,
     deadline: Duration,
-) -> Result<String, SourceError> {
-    let out = run_capture_ok(git, root, &["merge-base", left, right], deadline, None)?;
-    let oid = out.trim();
-    if oid.is_empty() {
-        return Err(SourceError::GitFailed {
-            args: format!("merge-base {left} {right}"),
-            stderr: "empty output".into(),
-        });
+) -> Result<Option<String>, SourceError> {
+    let args = ["merge-base", "--end-of-options", left, right];
+    let mut out = Vec::new();
+    let result = run_git(git, root, &args, deadline, None, &mut |chunk| {
+        out.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    let oid = String::from_utf8_lossy(&out).trim().to_string();
+    if result.status_ok && !oid.is_empty() {
+        return Ok(Some(oid));
     }
-    Ok(oid.to_string())
+    if result.exit_code == Some(1) && oid.is_empty() {
+        return Ok(None);
+    }
+    Err(SourceError::GitFailed {
+        args: args.join(" "),
+        stderr: String::from_utf8_lossy(&result.stderr).trim().to_string(),
+    })
+}
+
+/// This checkout's `HEAD` commit; an unborn branch is the typed
+/// [`SourceError::UnbornHead`] rather than an invalid-ref error about a
+/// ref the user never typed. With `cwd = root`, a linked worktree resolves
+/// its own `HEAD`.
+fn resolve_head(root: &Path, git: &Path, deadline: Duration) -> Result<String, SourceError> {
+    match resolve_ref(root, git, "HEAD", deadline) {
+        Ok(oid) => Ok(oid),
+        Err(SourceError::InvalidRef { .. }) => Err(SourceError::UnbornHead),
+        Err(e) => Err(e),
+    }
+}
+
+/// Old endpoint of a branch review: the merge base of `spec` and this
+/// checkout's `HEAD`, so a plain `--base main` reviews the branch from its
+/// fork point (its own commits plus local changes) instead of diffing
+/// against everything that landed on `main` since. `spec` comes from the
+/// shared refs while `HEAD` is the checkout's own, so a linked worktree
+/// gets its own fork point. No shared history and an unborn `HEAD` are
+/// explicit errors, never a fallback to the ref's tip.
+fn resolve_branch_base(
+    root: &Path,
+    git: &Path,
+    spec: &str,
+    deadline: Duration,
+) -> Result<Endpoint, SourceError> {
+    let base_oid = resolve_ref(root, git, spec, deadline)?;
+    let head = resolve_head(root, git, deadline)?;
+    let oid = merge_base(root, git, &base_oid, &head, deadline)?.ok_or_else(|| {
+        SourceError::NoMergeBase {
+            left: spec.to_string(),
+            right: "HEAD".to_string(),
+        }
+    })?;
+    Ok(Endpoint::Commit { oid })
 }
 
 fn resolve_head_or_empty_tree(
@@ -1417,6 +1471,10 @@ fn unreachable_resolved() -> &'static Resolved {
 
 struct RunOutput {
     status_ok: bool,
+    /// The process exit code, `None` when it died from a signal (including
+    /// the deadline kill, which is reported as `Timeout` before this is
+    /// ever inspected).
+    exit_code: Option<i32>,
     stderr: Vec<u8>,
 }
 
@@ -1562,6 +1620,7 @@ fn run_git(
 
     Ok(RunOutput {
         status_ok: status.success(),
+        exit_code: status.code(),
         stderr: stderr_bytes,
     })
 }

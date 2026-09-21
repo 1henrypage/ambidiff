@@ -114,12 +114,11 @@ pub fn init(args: InitArgs) -> Result<i32> {
         .clone()
         .unwrap_or_else(|| default_review_name(&root));
 
-    let mut source = Source::git(args.base.clone());
-    if args.staged {
-        source
-            .extra
-            .insert("staged".to_string(), serde_json::Value::Bool(true));
-    }
+    let source = if args.staged {
+        Source::git_staged(args.base.clone())
+    } else {
+        Source::git(args.base.clone())
+    };
 
     let review = ReviewFile::new(name.clone(), source, &now_rfc3339());
     store.init(&review)?;

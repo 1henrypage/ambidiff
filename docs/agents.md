@@ -26,9 +26,17 @@ standing instruction, not on an agent noticing `.ambidiff.json` by itself.
 `ambidiff` field; this build writes 1.
 
 Top level: `review` (name), `revision` (current pass, starts at 1),
-`source` (`{kind: "git", base?: "<ref>"}`), `createdAt`, `updatedAt`,
-`comments`, and `quarantined` (records that failed validation on a read,
-preserved verbatim). Unknown fields round-trip untouched.
+`source` (`{kind: "git", base?: "<ref>", staged?: true}`), `createdAt`,
+`updatedAt`, `comments`, and `quarantined` (records that failed validation
+on a read, preserved verbatim). Unknown fields round-trip untouched.
+
+A plain `base` ref reviews the current branch from its merge base with
+that ref: the branch's own commits plus staged, unstaged and untracked
+local changes, never what landed on the ref since the fork. `staged`
+swaps the working tree for the index. `A..B` compares two commits and
+`A...B` compares B with its merge base with A (git's meanings; neither
+involves the working tree). No `base` means the working tree against the
+index.
 
 Comment fields:
 
