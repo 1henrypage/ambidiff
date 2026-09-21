@@ -352,7 +352,7 @@ fn agent_setup_is_idempotent_and_check_aware() {
     assert_eq!(out.status.code(), Some(0));
     let agents = std::fs::read_to_string(root.join("AGENTS.md")).expect("AGENTS.md");
     assert!(agents.contains("BEGIN ambidiff"));
-    assert!(agents.contains("NEVER run `ambidiff comment resolve`"));
+    assert!(agents.contains("By default, NEVER run `ambidiff comment"));
     let claude = std::fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md");
     assert!(claude.starts_with("# Existing instructions"));
     assert!(claude.contains("BEGIN ambidiff"));

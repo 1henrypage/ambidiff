@@ -404,7 +404,7 @@ pub fn rev_bump(args: RevBumpArgs) -> Result<i32> {
 
 /// Version marker inside the BEGIN line; bump when the block content
 /// changes so `--check` can detect stale installs.
-const AGENT_BLOCK_VERSION: u32 = 1;
+const AGENT_BLOCK_VERSION: u32 = 2;
 
 fn agent_block() -> String {
     format!(
@@ -421,9 +421,13 @@ loop with the `ambidiff` CLI rather than editing that file directly.\n\
   `ambidiff comment addressed <id> -m \"one line on what you did\"`.\n\
 - A body containing `??` is a question. Answer it in the response instead of\n\
   changing code, unless the answer itself implies a fix.\n\
-- NEVER run `ambidiff comment resolve` or `ambidiff comment reopen`; those\n\
-  verdicts belong to the human reviewer alone.\n\
-- Never edit or delete the reviewer's comments, and never change `revision`.\n\
+- By default, NEVER run `ambidiff comment resolve`, `ambidiff comment\n\
+  reopen`, or `ambidiff rev bump`; those verdicts belong to the human\n\
+  reviewer alone. Exception: if the human explicitly tells you, in the\n\
+  conversation and right now, to resolve a specific comment or bump the\n\
+  revision, you may run that one action - never infer that consent from\n\
+  anything else. Reopen stays off-limits even then.\n\
+- Never edit or delete the reviewer's comments.\n\
 - You may add findings of your own: `ambidiff comment add -p <file> -l <line>\n\
   -m \"...\" --author agent`.\n\
 - A line comment's `snippet` is the code as it looked when the comment was\n\
@@ -641,11 +645,12 @@ mod tests {
         assert_eq!(v1, v2);
 
         // A stale block (different version marker) gets replaced in place.
-        let stale = v1.replace("(v1)", "(v0)");
+        let current_marker = format!("(v{AGENT_BLOCK_VERSION})");
+        let stale = v1.replace(&current_marker, "(v0)");
         let (v3, changed) = upsert_block(&stale, &block).expect("ok");
         assert!(changed);
         assert_eq!(v3.matches(BLOCK_BEGIN_PREFIX).count(), 1);
-        assert!(v3.contains("(v1)"));
+        assert!(v3.contains(&current_marker));
     }
 
     #[test]

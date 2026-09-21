@@ -56,25 +56,33 @@ open ----addressed----> addressed --resolved--> resolved
 
 - Address: from open or reopened; anyone, typically the agent; optional
   response.
-- Resolve: HUMAN ONLY; from open, addressed, or reopened.
-- Reopen: HUMAN ONLY; from addressed or resolved.
+- Resolve: HUMAN ONLY; from open, addressed, or reopened. Exception: an
+  agent may run `ambidiff comment resolve` when a human explicitly directs
+  it to, in the moment, naming the comment; absent that instruction it is
+  still off-limits to agents.
+- Reopen: HUMAN ONLY; from addressed or resolved. No agent exception - an
+  agent must never run `ambidiff comment reopen`, even under explicit
+  instruction.
 - Resolve addressed: HUMAN ONLY; bulk-resolves every `addressed` comment in
   one action (TUI `X`, neovim `gX`, browser `X`); open and reopened
-  comments are untouched.
+  comments are untouched. No agent exception; there is no CLI verb for it,
+  so it is reachable only through an interactive frontend.
 - The agent to-do list is exactly {open, reopened}.
 
 Illegal transitions fail with typed errors at the CLI and every frontend.
 The CLI cannot verify who is human, so the resolve/reopen/resolve-addressed
-restriction is a contract: the agent instructions forbid those verbs, and
-the interactive frontends are the human path. There is no CLI verb for
-resolve addressed - it is a UI-only action.
+restriction is a contract, not a code-level check: agent instructions
+forbid reopen and resolve-addressed outright, and forbid resolve except
+when a human explicitly directs that one action in the conversation; the
+interactive frontends remain the ordinary human path for all three.
 
 ## Revisions
 
 A pass ends when the agent finishes addressing: once no comment is open or
 reopened, the next comment added (or comment reopened) bumps `revision`.
 New comments carry the current revision in `rev`. `ambidiff rev bump`
-starts a pass manually.
+starts a pass manually; like resolve, this is a human call that an agent
+may run only when a human explicitly directs it to in the conversation.
 
 ## Concurrency
 
@@ -105,7 +113,10 @@ See `ambidiff --help` and the README for the full listing.
   `view`, `expand`, `commands`, `comment.add`, `comment.edit` (`{id, body}`),
   `comment.delete` (`{id}` -> `{deleted}`), `comment.address`,
   `comment.resolve`, `comment.reopen`, `comment.resolveAddressed` (no
-  payload; human only, agents must not call it), `rev.bump`, `shutdown`.
+  payload), `rev.bump`, `shutdown`. `comment.resolve` and `rev.bump` are
+  human only except one call an agent makes when a human explicitly
+  directs it to in the moment; `comment.reopen` and
+  `comment.resolveAddressed` are human only with no exception.
   `initialize` also reports `readOnlyReason`, `generation`, `sourceError`,
   `comparison`, and `methods`; `files` adds `skipped`, `sourceError`,
   `comparison`, `warnings`, `generation`; `expand` returns `rows` plus
@@ -119,8 +130,11 @@ See `ambidiff --help` and the README for the full listing.
   that its reply echoes. Requests: `refresh` (-> a full `snapshot`),
   `getFile`, `getSrc` (listed paths only), `comment.add`, `comment.edit` and
   `comment.delete` (`commentId`), `comment.address` / `comment.resolve` /
-  `comment.reopen` / `comment.resolveAddressed` (human only, agents must not
-  call it), `rev.bump`. Errors are `{type: "error", id, code,
+  `comment.reopen` / `comment.resolveAddressed` / `rev.bump` (all human
+  only; `comment.resolve` and `rev.bump` have one exception, an agent call
+  made only when a human explicitly directs it to in the moment -
+  `comment.reopen` and `comment.resolveAddressed` have none). Errors are
+  `{type: "error", id, code,
   message}`. Broadcasts `reviewChanged` and `diffChanged` carry the new
   state and `generation`. Messages are limited to 1 MiB inbound and 16 MiB
   outbound; at most 32 connections are served.
