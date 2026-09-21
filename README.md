@@ -17,6 +17,15 @@ ambidiff agent-setup          # brief agents via AGENTS.md / CLAUDE.md
 ambidiff                      # open the TUI and leave comments
 ```
 
+Two more ways in, both usable without a review file (the first comment
+creates one):
+
+```sh
+ambidiff --commit HEAD        # one commit against its parent, with a commit banner
+ambidiff --stack              # a stack of PR branches above trunk, one target per PR
+ambidiff init --stack --upstream origin/main   # or record it up front
+```
+
 Then hand the tree to an agent. The standing instructions tell it to run:
 
 ```sh
@@ -35,12 +44,34 @@ The same review follows you across frontends because every engine watches
 the file: comment in the TUI, re-review in neovim, keep the browser open on
 a second screen, and all three converge on each change.
 
+## Stacked PRs
+
+A stack is a linear chain of commits on one branch above trunk, with one
+local branch per PR pointing at its tip (`git rebase --update-refs` moves
+them together). `ambidiff --stack` shows a strip across the top with every
+target: the PRs bottom to top, `head` when commits sit above the topmost
+branch, `stack` for the whole thing, and `worktree` when the tree is
+dirty. `)` and `(` move up and down the stack, `p` opens a picker, a click
+on the strip selects, and the browser gets the same strip (neovim `]t` /
+`[t`, `:Ambidiff targets`). Reviewing PR 2 diffs `tip(PR1)..tip(PR2)`.
+
+Every comment made on a PR is tagged with it (`"target": {"kind":
+"branch", "name": "auth-2"}`), so PR 1's comments never show up misplaced
+on PR 2. PR identity is the branch name, never a commit oid: amend, restack
+or land the bottom PR and the comments stay put; a comment whose branch has
+left the stack shows a "was on" badge in the unattached group instead of
+disappearing. The selected target is per process and never written to the
+review file. Agents comment with `ambidiff comment add --target <branch>`
+and, for a to-do on a branch, fold the fix into that PR's commit and
+restack.
+
 ## Frontends
 
 - **Terminal**: `ambidiff`. File tree with annotated/unreviewed filters,
   unified and side-by-side layouts, syntax highlighting, intra-line
   word-diff, collapsed-gap expansion, in-diff search, comment cards with the
-  full lifecycle, live reload. `?` shows every binding.
+  full lifecycle, the stack target strip, live reload. `?` shows every
+  binding.
 - **Neovim**: [ambidiff-nvim](../ambidiff-nvim), a thin client over
   `ambidiff engine --stdio`.
 - **Browser**: `ambidiff web` serves a loopback-only page (no deployed
@@ -77,9 +108,13 @@ only a pluggable diff source for viewing.
 }
 ```
 
+- `source` selects the comparison: `base` (a ref or range against the
+  working tree, `staged` for the index), `commit` (one commit against its
+  parent), or `stack` (PR branches above trunk, `upstream` naming it).
 - Anchor levels via nulls: `path: null` is a review-level comment,
   `line: null` a file-level one, otherwise a line or range. Removed lines
-  anchor old-side numbers; added and context lines anchor new-side.
+  anchor old-side numbers; added and context lines anchor new-side. In a
+  stack review every path comment also carries `target`.
 - `snippet` captures the source at comment time. When the code drifts, the
   comment shows an outdated badge but stays intelligible forever; when a
   file is renamed, the comment follows it with a "was" badge; when nothing

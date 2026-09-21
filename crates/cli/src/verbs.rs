@@ -542,7 +542,7 @@ pub fn rev_bump(args: RevBumpArgs) -> Result<i32> {
 
 /// Version marker inside the BEGIN line; bump when the block content
 /// changes so `--check` can detect stale installs.
-const AGENT_BLOCK_VERSION: u32 = 2;
+const AGENT_BLOCK_VERSION: u32 = 3;
 
 fn agent_block() -> String {
     format!(
@@ -570,6 +570,11 @@ loop with the `ambidiff` CLI rather than editing that file directly.\n\
   -m \"...\" --author agent`.\n\
 - A line comment's `snippet` is the code as it looked when the comment was\n\
   written; if lines have moved, find the code by content, not line number.\n\
+- In a stack review (`source.stack` in `ambidiff status --json`) a to-do\n\
+  carries `target`: for a `branch` target, fold the fix into the commit at\n\
+  that branch (its current oid is the target's `tip` in `status --json`)\n\
+  and restack the branches above it with your stack tooling. Findings you\n\
+  add there need `--target <branch>`.\n\
 \n\
 When nothing is left in the to-do list, stop and report back; the human\n\
 re-reviews from there.\n\
