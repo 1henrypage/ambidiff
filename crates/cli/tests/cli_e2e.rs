@@ -785,3 +785,267 @@ fn status_json_reports_the_read_only_reason_and_mutations_leave_bytes_untouched(
         "bytes untouched"
     );
 }
+
+// ---------------------------------------------------------------------
+// Single-commit and stacked-PR reviews
+// ---------------------------------------------------------------------
+
+/// The Databricks shape: `main` (base), PR `auth-1` editing `src/a.ts`,
+/// PR `auth-2` on top adding `src/b.ts`, `auth-2` checked out.
+fn stack_repo() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(
+        &root,
+        "src/a.ts",
+        "export const A = 'BASE_ALPHA';\nexport const K = 1;\n",
+    );
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "auth-1"]);
+    write(
+        &root,
+        "src/a.ts",
+        "export const A = 'AUTH_ONE_BRAVO';\nexport const K = 1;\n",
+    );
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add bravo"]);
+    git(&root, &["checkout", "-q", "-b", "auth-2"]);
+    write(&root, "src/b.ts", "export const B = 'AUTH_TWO_CHARLIE';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add charlie"]);
+    (dir, root)
+}
+
+#[test]
+fn init_commit_records_the_source_and_status_describes_it() {
+    let (_dir, root) = stack_repo();
+    let init = ok_json(&root, &["init", "--commit", "HEAD", "--json"]);
+    assert_eq!(
+        init["source"],
+        serde_json::json!({"kind": "git", "commit": "HEAD"})
+    );
+    let review = review_file(&root);
+    assert_eq!(review.source.commit.as_deref(), Some("HEAD"));
+    assert!(review.source.stack.is_none());
+
+    let (code, stdout) = stdout_of(&root, &["status"]);
+    assert_eq!(code, 0);
+    let text = String::from_utf8_lossy(&stdout);
+    assert!(text.contains("git commit HEAD"), "{text}");
+    let status = ok_json(&root, &["status", "--json"]);
+    assert_eq!(status["source"]["commit"], "HEAD");
+    assert!(
+        status.get("stack").is_none(),
+        "no stack block outside stacks"
+    );
+}
+
+#[test]
+fn init_commit_with_a_bad_ref_fails_before_writing_a_file() {
+    let (_dir, root) = stack_repo();
+    let (code, stderr) = err_of(&root, &["init", "--commit", "no-such-ref"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no-such-ref"), "{stderr}");
+    assert!(!root.join(".ambidiff.json").exists(), "nothing written");
+}
+
+#[test]
+fn init_stack_and_status_json_report_every_target_with_counts() {
+    let (_dir, root) = stack_repo();
+    let init = ok_json(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    assert_eq!(
+        init["source"],
+        serde_json::json!({"kind": "git", "stack": {"upstream": "main"}})
+    );
+    // One comment per PR, plus a legacy (untargeted) review-level note.
+    ok_json(
+        &root,
+        &[
+            "comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "bravo??", "--target", "auth-1",
+            "--json",
+        ],
+    );
+    ok_json(
+        &root,
+        &[
+            "comment", "add", "-p", "src/b.ts", "-l", "1", "-m", "charlie", "--target", "auth-2",
+            "--json",
+        ],
+    );
+    ok_json(&root, &["comment", "add", "-m", "overall", "--json"]);
+
+    let (code, stdout) = stdout_of(&root, &["status", "--json"]);
+    assert_eq!(code, 10, "to-dos exist");
+    let status: serde_json::Value = serde_json::from_slice(&stdout).expect("json");
+    assert_eq!(status["stack"]["trunk"], "main");
+    assert!(status["stack"]["base"].is_string());
+    assert!(status["stack"]["head"].is_string());
+    let targets = status["stack"]["targets"].as_array().expect("targets");
+    let labels: Vec<&str> = targets.iter().filter_map(|t| t["label"].as_str()).collect();
+    assert_eq!(labels, vec!["auth-1", "auth-2", "stack"]);
+    assert_eq!(targets[0]["position"], 1);
+    assert_eq!(targets[0]["subject"], "add bravo");
+    assert_eq!(
+        targets[0]["counts"],
+        serde_json::json!({"todo": 1, "total": 1})
+    );
+    assert_eq!(
+        targets[1]["counts"],
+        serde_json::json!({"todo": 1, "total": 1})
+    );
+    assert_eq!(
+        targets[2]["counts"],
+        serde_json::json!({"todo": 0, "total": 0})
+    );
+    assert_eq!(targets[1]["comparison"]["old"]["oid"], targets[0]["tip"]);
+    assert_eq!(
+        status["untargeted"],
+        serde_json::json!({"todo": 1, "total": 1})
+    );
+    assert_eq!(status["wasOn"], serde_json::json!({"todo": 0, "total": 0}));
+    assert_eq!(status["stackError"], serde_json::Value::Null);
+
+    let (code, stdout) = stdout_of(&root, &["status"]);
+    assert_eq!(code, 10);
+    let text = String::from_utf8_lossy(&stdout);
+    assert!(text.contains("git stack (upstream main)"), "{text}");
+    assert!(text.contains("auth-1"), "{text}");
+    assert!(text.contains("add charlie"), "{text}");
+    assert!(text.contains("untargeted 1/1"), "{text}");
+}
+
+#[test]
+fn init_stack_without_a_trunk_fails_with_the_upstream_hint() {
+    let (_dir, root) = stack_repo();
+    git(&root, &["branch", "-m", "main", "trunk"]);
+    let (code, stderr) = err_of(&root, &["init", "--stack"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--upstream"), "{stderr}");
+    assert!(!root.join(".ambidiff.json").exists());
+    // Naming the trunk makes it work.
+    ok_json(&root, &["init", "--stack", "--upstream", "trunk", "--json"]);
+}
+
+#[test]
+fn stack_comments_require_a_target_and_worktree_reviews_refuse_one() {
+    let (_dir, root) = stack_repo();
+    ok_json(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    let (code, stderr) = err_of(
+        &root,
+        &["comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "x"],
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--target"), "{stderr}");
+    let (code, stderr) = err_of(
+        &root,
+        &[
+            "comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "x", "--target", "",
+        ],
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--target"), "{stderr}");
+    assert!(
+        review_file(&root).comments.is_empty(),
+        "nothing was written"
+    );
+
+    // Review-level comments may go without a target.
+    let note = ok_json(&root, &["comment", "add", "-m", "note", "--json"]);
+    assert!(note.get("target").is_none(), "{note}");
+
+    // The snippet is captured against the comment's own target, not the
+    // process default (the topmost PR).
+    let tagged = ok_json(
+        &root,
+        &[
+            "comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "bravo??", "--target", "auth-1",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        tagged["target"],
+        serde_json::json!({"kind": "branch", "name": "auth-1"})
+    );
+    assert_eq!(tagged["snippet"], "export const A = 'AUTH_ONE_BRAVO';");
+    let shown = ok_json(
+        &root,
+        &[
+            "comment",
+            "show",
+            tagged["id"].as_str().expect("id"),
+            "--json",
+        ],
+    );
+    assert_eq!(shown["target"]["name"], "auth-1");
+
+    let (code, stdout) = stdout_of(&root, &["comment", "list"]);
+    assert_eq!(code, 0);
+    assert!(String::from_utf8_lossy(&stdout).contains("[auth-1]"));
+    let listed = ok_json(&root, &["comment", "list", "--target", "auth-1", "--json"]);
+    assert_eq!(listed["comments"].as_array().map(Vec::len), Some(1));
+    let listed = ok_json(&root, &["comment", "list", "--target", "stack", "--json"]);
+    assert_eq!(listed["comments"].as_array().map(Vec::len), Some(0));
+
+    // A plain worktree review has no targets to name.
+    let (_dir2, plain) = scratch_repo();
+    ok_json(&plain, &["init", "--base", "HEAD", "--json"]);
+    let (code, stderr) = err_of(&plain, &["comment", "add", "-m", "x", "--target", "stack"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("not a stack review"), "{stderr}");
+}
+
+#[test]
+fn a_deleted_branch_is_reported_as_was_on() {
+    let (_dir, root) = stack_repo();
+    ok_json(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    ok_json(
+        &root,
+        &[
+            "comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "bravo??", "--target", "auth-1",
+            "--json",
+        ],
+    );
+    // The bottom PR lands: `main` fast-forwards onto it and the branch goes.
+    git(&root, &["branch", "-f", "main", "auth-1"]);
+    git(&root, &["branch", "-D", "auth-1"]);
+    let (code, stdout) = stdout_of(&root, &["status", "--json"]);
+    assert_eq!(code, 10, "the was-on comment is still a to-do");
+    let status: serde_json::Value = serde_json::from_slice(&stdout).expect("json");
+    let labels: Vec<&str> = status["stack"]["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .filter_map(|t| t["label"].as_str())
+        .collect();
+    assert_eq!(labels, vec!["auth-2", "stack"]);
+    assert_eq!(status["wasOn"], serde_json::json!({"todo": 1, "total": 1}));
+    // The comment itself keeps its target; nothing rewrites history.
+    let comments = review_file(&root).comments;
+    assert_eq!(
+        comments[0].target.as_ref().map(|t| t.label().to_string()),
+        Some("auth-1".into())
+    );
+}
+
+#[test]
+fn status_reports_a_stack_discovery_error_without_changing_the_exit_code() {
+    let (_dir, root) = stack_repo();
+    ok_json(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    ok_json(&root, &["comment", "add", "-m", "todo", "--json"]);
+    git(&root, &["branch", "-m", "main", "trunk"]);
+    let (code, stdout) = stdout_of(&root, &["status", "--json"]);
+    assert_eq!(code, 10, "the exit code still follows the to-do count");
+    let status: serde_json::Value = serde_json::from_slice(&stdout).expect("json");
+    assert_eq!(status["stack"], serde_json::Value::Null);
+    assert!(
+        status["stackError"]
+            .as_str()
+            .is_some_and(|e| e.contains("main")),
+        "{status}"
+    );
+    let (_, stdout) = stdout_of(&root, &["status"]);
+    assert!(String::from_utf8_lossy(&stdout).contains("! stack:"));
+}

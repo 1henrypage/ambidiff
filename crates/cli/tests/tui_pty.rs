@@ -987,3 +987,281 @@ fn resolve_addressed_with_nothing_addressed_flashes_without_confirming() {
     send(&mut session, "q");
     wait_for_exit(&mut session);
 }
+
+// ---------------------------------------------------------------------
+// Stack targets and single-commit review
+// ---------------------------------------------------------------------
+
+/// `main` (base) with `src/a.ts` = BASE_ALPHA; PR `auth-1` rewrites it to
+/// AUTH_ONE_BRAVO; PR `auth-2` adds `src/b.ts` = AUTH_TWO_CHARLIE. Every
+/// marker is a wholly distinct word so ratatui's cell-diffing repaints it
+/// as one contiguous run. Returns without a review file.
+fn stack_repo_without_review() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(&root, "src/a.ts", "BASE_ALPHA\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "auth-1"]);
+    write(&root, "src/a.ts", "AUTH_ONE_BRAVO\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add bravo"]);
+    git(&root, &["checkout", "-q", "-b", "auth-2"]);
+    write(&root, "src/b.ts", "AUTH_TWO_CHARLIE\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add charlie"]);
+    (dir, root)
+}
+
+fn stack_repo() -> (tempfile::TempDir, PathBuf) {
+    let (dir, root) = stack_repo_without_review();
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args([
+            "init",
+            "--review",
+            "pty-stack",
+            "--stack",
+            "--upstream",
+            "main",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("init");
+    assert!(out.status.success());
+    (dir, root)
+}
+
+fn review_json(root: &Path) -> serde_json::Value {
+    let content = std::fs::read_to_string(root.join(".ambidiff.json")).expect("review file");
+    serde_json::from_str(&content).expect("json")
+}
+
+#[test]
+fn strip_lists_the_stack_and_target_keys_switch_the_diff() {
+    let (_dir, root) = stack_repo();
+    let mut session = spawn_tui(&root);
+    // The topmost PR opens selected; the strip names both PRs.
+    wait_for_all(
+        &mut session,
+        &[
+            "1 auth-1",
+            "[2 auth-2]",
+            "AUTH_TWO_CHARLIE",
+            "target:auth-2",
+        ],
+        "initial stack render",
+    );
+    send(&mut session, "(");
+    wait_for_all(
+        &mut session,
+        &["[1 auth-1]", "AUTH_ONE_BRAVO", "target:auth-1"],
+        "( selects the PR below",
+    );
+    send(&mut session, "(");
+    wait_for(&mut session, "bottom of stack", "( at the bottom flashes");
+    send(&mut session, ")");
+    wait_for_all(
+        &mut session,
+        &["[2 auth-2]", "AUTH_TWO_CHARLIE"],
+        ") selects the PR above",
+    );
+
+    // The picker: k moves to auth-1, enter selects it.
+    send(&mut session, "p");
+    wait_for_all(
+        &mut session,
+        &["targets (trunk main)", "add bravo", "add charlie"],
+        "picker lists subjects",
+    );
+    send(&mut session, "k");
+    send(&mut session, "\r");
+    wait_for_all(
+        &mut session,
+        &["[1 auth-1]", "AUTH_ONE_BRAVO"],
+        "picker selection applied",
+    );
+
+    // A comment saved while looking at PR 1 is tagged with it.
+    send(&mut session, "jjj"); // banner, hunk, removed, added
+    send(&mut session, "c");
+    wait_for(
+        &mut session,
+        "comment on src/a.ts:1 [auth-1]",
+        "editor names the target",
+    );
+    send(&mut session, "bravo??");
+    send(&mut session, "\x13");
+    wait_for(&mut session, "bravo??", "comment card rendered");
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+
+    let review = review_json(&root);
+    let comments = review["comments"].as_array().expect("comments");
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["path"], "src/a.ts");
+    assert_eq!(
+        comments[0]["target"],
+        serde_json::json!({"kind": "branch", "name": "auth-1"})
+    );
+    assert_eq!(comments[0]["snippet"], "AUTH_ONE_BRAVO");
+}
+
+#[test]
+fn clicking_the_strip_selects_that_target() {
+    let (_dir, root) = stack_repo();
+    let mut session = spawn_tui(&root);
+    resize(&mut session, 100, 30);
+    wait_for_all(
+        &mut session,
+        &["1 auth-1", "AUTH_TWO_CHARLIE"],
+        "initial render",
+    );
+    // The strip is the first row; " 1 auth-1 " spans its first ten cells.
+    click(&mut session, 3, 0);
+    wait_for_all(
+        &mut session,
+        &["[1 auth-1]", "AUTH_ONE_BRAVO", "target:auth-1"],
+        "strip click selects auth-1",
+    );
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+#[test]
+fn an_external_restack_keeps_the_comment_on_its_branch() {
+    let (_dir, root) = stack_repo();
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args([
+            "comment",
+            "add",
+            "-p",
+            "src/a.ts",
+            "-l",
+            "1",
+            "-m",
+            "SEEDED_NOTE",
+            "--target",
+            "auth-1",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("AMBIDIFF_AUTHOR", "pty")
+        .output()
+        .expect("seed comment");
+    assert!(out.status.success());
+
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "AUTH_TWO_CHARLIE", "initial render");
+    send(&mut session, "(");
+    wait_for_all(
+        &mut session,
+        &["AUTH_ONE_BRAVO", "SEEDED_NOTE"],
+        "comment on auth-1",
+    );
+
+    // Fold a fix into the bottom PR from the top and restack; every tip
+    // moves but the branch names stay.
+    write(&root, "src/a.ts", "AUTH_ONE_BRAVO\nAUTH_ONE_DELTA\n");
+    git(&root, &["commit", "-qa", "--fixup", "auth-1"]);
+    let out = Command::new("git")
+        .args([
+            "rebase",
+            "-q",
+            "-i",
+            "--autosquash",
+            "--update-refs",
+            "main",
+        ])
+        .current_dir(&root)
+        .env("GIT_SEQUENCE_EDITOR", "true")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("rebase");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Only the new line is repainted (ratatui skips unchanged cells), so
+    // force fresh paints to prove the rest: the picker lists auth-1 with
+    // its one comment, and landing the cursor on the card re-sends it.
+    wait_for(
+        &mut session,
+        "AUTH_ONE_DELTA",
+        "the watch picks up the restack",
+    );
+    send(&mut session, "p");
+    wait_for_all(
+        &mut session,
+        &[
+            "targets (trunk main)",
+            "1 auth-1",
+            "\u{25cb}1/1",
+            "add bravo",
+        ],
+        "auth-1 keeps its comment after the restack",
+    );
+    send(&mut session, "\x1b");
+    send(&mut session, "G");
+    send(&mut session, "kk");
+    wait_for(
+        &mut session,
+        "SEEDED_NOTE",
+        "the comment card is still on auth-1",
+    );
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+    let review = review_json(&root);
+    assert_eq!(review["comments"][0]["target"]["name"], "auth-1");
+}
+
+#[test]
+fn a_commit_review_opens_without_a_review_file_and_the_first_comment_creates_it() {
+    let (_dir, root) = stack_repo_without_review();
+    assert!(!root.join(".ambidiff.json").exists());
+    let mut session = spawn_tui_with(&root, &["--commit", "auth-1"]);
+    // Wide enough that the overview banner is not clipped by the tree pane.
+    resize(&mut session, 120, 30);
+    wait_for_all(
+        &mut session,
+        &["AUTH_ONE_BRAVO", "[unsaved]", "commit:"],
+        "commit review opens unsaved",
+    );
+    // No strip: the diff banner is the first row.
+    send(&mut session, "{"); // overview
+    wait_for(
+        &mut session,
+        "add bravo",
+        "overview banner names the commit",
+    );
+    send(&mut session, "}"); // back to the file
+    wait_for(&mut session, "AUTH_ONE_BRAVO", "file again");
+    send(&mut session, "jjj");
+    send(&mut session, "c");
+    wait_for(
+        &mut session,
+        "comment on src/a.ts:1",
+        "editor without a target suffix",
+    );
+    send(&mut session, "first note");
+    send(&mut session, "\x13");
+    wait_for(&mut session, "first note", "comment card rendered");
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+
+    let review = review_json(&root);
+    assert_eq!(
+        review["source"],
+        serde_json::json!({"kind": "git", "commit": "auth-1"})
+    );
+    assert_eq!(review["comments"][0]["body"], "first note");
+    assert!(review["comments"][0].get("target").is_none());
+    let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).expect("exclude");
+    assert!(exclude.contains(".ambidiff.json"), "{exclude}");
+}

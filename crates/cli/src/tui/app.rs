@@ -569,6 +569,16 @@ impl App {
             return;
         }
         self.refresh(RefreshKind::Diff);
+        // A different target is a different changed set: when the open file
+        // is not part of it, land on the new target's first file (as the
+        // initial open does) rather than on an overview that only says the
+        // old file vanished.
+        if matches!(self.target, FileTarget::Overview)
+            && let Some(first) = self.visible_file_order().first().copied()
+        {
+            let path = self.snapshot.files[first].path.clone();
+            self.open_target(FileTarget::File(path));
+        }
         let label = self.selected_label().unwrap_or("?").to_string();
         self.flash(&format!("target: {label}"));
     }

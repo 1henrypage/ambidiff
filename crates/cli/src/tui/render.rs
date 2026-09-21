@@ -1130,6 +1130,12 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_else(|| "-".into())
         ));
     }
+    if let Some(commit) = app.commit_summary() {
+        left.push_str(&format!(
+            "  commit:{}",
+            commit.oid.get(..8).unwrap_or(&commit.oid)
+        ));
+    }
     let mut toggles = String::new();
     toggles.push_str(match app.mode() {
         ViewMode::Unified => " unified",
