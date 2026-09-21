@@ -22,12 +22,27 @@ export interface EditorDom {
   focusReturn: HTMLElement;
 }
 
+/** One row of a picker list. */
+export interface PickItem {
+  label: string;
+  detail?: string;
+}
+
+export interface PickOptions<T extends PickItem> {
+  title: string;
+  items: T[];
+  /** Index of the row the cursor starts on. */
+  initial: number;
+  onPick: (index: number, item: T) => void;
+}
+
 export interface Editor {
   prompt(opts: PromptOptions): void;
   confirm(title: string, onConfirm: () => void): void;
   help(commands: CommandSpec[]): void;
   search(onSubmit: (query: string) => void): void;
   lineInput(onSubmit: (line: number) => void): void;
+  pick<T extends PickItem>(opts: PickOptions<T>): void;
   close(): void;
   isOpen(): boolean;
 }
@@ -230,6 +245,72 @@ export function createEditor(dom: EditorDom): Editor {
     };
   }
 
+  /** A generic list picker (the target picker): j/k/arrows move, enter
+   * picks, esc closes, click picks, the backdrop closes. */
+  function pick<T extends PickItem>(opts: PickOptions<T>): void {
+    const b = box();
+    b.tabIndex = -1;
+    const title = document.createElement("div");
+    title.style.marginBottom = "8px";
+    const strong = document.createElement("b");
+    strong.textContent = opts.title;
+    title.appendChild(strong);
+    b.appendChild(title);
+    const list = document.createElement("div");
+    list.className = "picker";
+    b.appendChild(list);
+    let cursor = Math.max(0, Math.min(opts.items.length - 1, opts.initial));
+    const rows: HTMLElement[] = opts.items.map((item, i) => {
+      const row = document.createElement("div");
+      row.className = "picker-row";
+      row.dataset["index"] = String(i);
+      row.appendChild(document.createTextNode(item.label));
+      if (item.detail) {
+        row.appendChild(document.createTextNode(" "));
+        const detail = document.createElement("span");
+        detail.className = "desc";
+        detail.textContent = item.detail;
+        row.appendChild(detail);
+      }
+      row.onclick = () => {
+        close();
+        opts.onPick(i, item);
+      };
+      list.appendChild(row);
+      return row;
+    });
+    const paint = () => rows.forEach((row, i) => row.classList.toggle("cursor", i === cursor));
+    paint();
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = "enter selects · j/k move · esc closes";
+    b.appendChild(hint);
+    b.focus();
+    b.onkeydown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      } else if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        cursor = Math.min(rows.length - 1, cursor + 1);
+        paint();
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        cursor = Math.max(0, cursor - 1);
+        paint();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const item = opts.items[cursor];
+        close();
+        if (item) opts.onPick(cursor, item);
+      }
+      e.stopPropagation();
+    };
+    dom.overlay.onclick = (e) => {
+      if (e.target === dom.overlay) close();
+    };
+  }
+
   function search(onSubmit: (query: string) => void): void {
     inputBox({
       placeholder: "search in diff",
@@ -250,5 +331,5 @@ export function createEditor(dom: EditorDom): Editor {
     });
   }
 
-  return { prompt, confirm, help, search, lineInput, close, isOpen };
+  return { prompt, confirm, help, search, lineInput, pick, close, isOpen };
 }

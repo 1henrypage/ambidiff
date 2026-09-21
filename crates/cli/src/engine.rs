@@ -4,7 +4,8 @@
 //! Requests:  {"id": N, "method": "...", "params": {...}}
 //! Responses: {"id": N, "result": ...} | {"id": N, "error": {code, message, data: {kind}}}
 //! Notifications (engine -> client, no id): {"method": "reviewChanged"} and
-//! {"method": "diffChanged"}, driven by the application's watch.
+//! {"method": "diffChanged"}, driven by the application's watch and by a
+//! generation bump from any request (a `target.select`, a `source` edit).
 //!
 //! Every method is served by the shared [`Application`]; this file only
 //! decodes payloads (through `protocol.rs`), maps errors into the RPC
@@ -25,7 +26,7 @@ use std::time::Duration;
 use ambidiff_core::projection::FileFilter;
 use ambidiff_core::protocol::{
     decode_comment_add, decode_comment_delete, decode_comment_edit, decode_expand,
-    decode_lifecycle, decode_view,
+    decode_lifecycle, decode_target_select, decode_view,
 };
 use ambidiff_core::review::{Action, Actor};
 use ambidiff_core::sanitize::sanitize_line;
@@ -34,7 +35,7 @@ use serde_json::{Value, json};
 
 use crate::application::{AppError, Application, OutcomeValue, ReviewCommand, Snapshot};
 use crate::args::EngineArgs;
-use crate::context::resolve_store;
+use crate::context::open_application;
 
 /// Bumped on breaking wire changes; the plugin warns on mismatch.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -56,6 +57,7 @@ pub const METHODS: &[&str] = &[
     "comment.reopen",
     "comment.resolveAddressed",
     "rev.bump",
+    "target.select",
     "shutdown",
 ];
 
@@ -70,8 +72,7 @@ pub fn run(args: EngineArgs) -> Result<i32> {
     if !args.stdio {
         anyhow::bail!("the engine speaks stdio only; pass --stdio");
     }
-    let store = resolve_store()?;
-    let mut app = Application::open(store);
+    let mut app = open_application(&args.source)?;
     // Arm BEFORE the held load: a write between the two is detected, never
     // absorbed into the watch baseline.
     if let Err(err) = app.start_watch() {
@@ -292,7 +293,9 @@ impl Engine {
 
     /// Forward watch hints as notifications. The thread also keeps the
     /// application's snapshot current so a request that follows a
-    /// notification sees the new state.
+    /// notification sees the new state. The generation cursor persists
+    /// across ticks: a bump made by the request thread between two ticks
+    /// (a `target.select`) is a diff change too, announced exactly once.
     fn start_notifier(
         &self,
         out: &Arc<Out>,
@@ -301,22 +304,26 @@ impl Engine {
         let app = Arc::clone(&self.app);
         let out = Arc::clone(out);
         let stop = Arc::clone(stop);
+        let mut last_generation = app.lock().unwrap_or_else(|e| e.into_inner()).generation();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(NOTIFY_POLL);
                 let (pending, diff_changed) = {
                     let mut app = app.lock().unwrap_or_else(|e| e.into_inner());
                     let pending = app.poll();
-                    let before = app.generation();
                     if pending.diff {
                         let _ = app.refresh();
                     } else if pending.review {
                         let _ = app.load();
                     }
-                    // A review edit that changes `source` reconfigures the
-                    // comparison and bumps the generation: that is a diff
-                    // change for the client even without a watch hint.
-                    (pending, pending.diff || app.generation() != before)
+                    // A review edit that changes `source`, or a target
+                    // selection, reconfigures the comparison and bumps the
+                    // generation: that is a diff change for the client even
+                    // without a watch hint.
+                    let now = app.generation();
+                    let changed = pending.diff || now != last_generation;
+                    last_generation = now;
+                    (pending, changed)
                 };
                 if pending.review {
                     out.send(&json!({"method": "reviewChanged"}));
@@ -357,6 +364,7 @@ impl Engine {
                 actor: Actor::Human,
             }),
             "rev.bump" => self.execute(ReviewCommand::RevBump),
+            "target.select" => self.target_select(params),
             other => Err(RpcError::method_not_found(other)),
         }
     }
@@ -380,6 +388,20 @@ impl Engine {
             OutcomeValue::ResolvedAddressed(ids) => json!({"resolvedAddressed": ids}),
             OutcomeValue::Revision(revision) => json!({"revision": revision}),
         })
+    }
+
+    /// Select this process's stack target; the notifier announces the
+    /// resulting generation bump as `diffChanged`.
+    fn target_select(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let req = decode_target_select(params)?;
+        let mut app = self.app.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = app.select_target(req.target)?;
+        Ok(json!({
+            "selected": snapshot.selected,
+            "targets": snapshot.targets,
+            "comparison": snapshot.comparison,
+            "generation": snapshot.generation,
+        }))
     }
 
     /// Every read path re-takes the held snapshot: cheap when the diff is
@@ -418,6 +440,9 @@ impl Engine {
                 "generation": snapshot.generation,
                 "sourceError": snapshot.source_error,
                 "comparison": snapshot.comparison,
+                "targets": snapshot.targets,
+                "selected": snapshot.selected,
+                "commit": snapshot.commit,
                 "methods": METHODS,
             }))
         })
@@ -455,6 +480,9 @@ impl Engine {
                 "skipped": snapshot.skipped,
                 "sourceError": snapshot.source_error,
                 "comparison": snapshot.comparison,
+                "targets": snapshot.targets,
+                "selected": snapshot.selected,
+                "commit": snapshot.commit,
                 "warnings": snapshot.warnings,
                 "generation": snapshot.generation,
             }))
@@ -514,7 +542,8 @@ mod tests {
             assert!(seen.insert(*m), "duplicate method {m}");
         }
         assert!(METHODS.contains(&"comment.edit") && METHODS.contains(&"comment.delete"));
-        assert!(METHODS.contains(&"shutdown"));
+        assert!(METHODS.contains(&"target.select"));
+        assert_eq!(METHODS.last(), Some(&"shutdown"));
     }
 
     #[test]

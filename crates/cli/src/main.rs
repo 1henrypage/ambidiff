@@ -16,7 +16,7 @@ use crate::args::{Cli, Command, CommentCommand, RevCommand, TuiArgs};
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        None => run_tui(TuiArgs::default()),
+        None => run_tui(cli.tui),
         Some(Command::Tui(args)) => run_tui(args),
         Some(Command::Init(args)) => verbs::init(args),
         Some(Command::Status(args)) => verbs::status(args),

@@ -647,3 +647,96 @@ fn slow_subscriber_does_not_block_others_and_is_dropped_on_write_timeout() {
     let snapshot = request(&mut lively, json!({"type": "refresh", "id": 9}));
     assert_eq!(snapshot["type"], "snapshot");
 }
+
+// ---------------------------------------------------------------------
+// Stack targets
+// ---------------------------------------------------------------------
+
+fn stack_repo() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(&root, "src/a.ts", "const a = 'BASE_ALPHA';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "auth-1"]);
+    write(&root, "src/a.ts", "const a = 'AUTH_ONE_BRAVO';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add bravo"]);
+    git(&root, &["checkout", "-q", "-b", "auth-2"]);
+    write(&root, "src/b.ts", "const b = 'AUTH_TWO_CHARLIE';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add charlie"]);
+    cli(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    (dir, root)
+}
+
+fn paths_of(msg: &Value) -> Vec<String> {
+    msg["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|f| f["path"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn target_select_acks_the_requester_and_broadcasts_diff_changed_to_every_tab() {
+    let (_dir, root) = stack_repo();
+    let server = Server::spawn(&root);
+    let (mut first, hello) = server.client();
+    assert_eq!(keys(&hello), keys(&fixture("web-hello.json")));
+    assert_eq!(hello["selected"]["name"], "auth-2");
+    assert_eq!(hello["targets"].as_array().map(Vec::len), Some(3));
+    assert_eq!(hello["commit"], Value::Null);
+    assert_eq!(paths_of(&hello), vec!["src/b.ts"]);
+    let (mut second, _) = server.client();
+
+    let ack = request(
+        &mut first,
+        json!({"type": "target.select", "id": 13, "target": {"kind": "branch", "name": "auth-1"}}),
+    );
+    assert_eq!(ack["type"], "targetSelected", "{ack}");
+    assert_eq!(keys(&ack), keys(&fixture("web-target-selected.json")));
+    assert_eq!(ack["selected"]["name"], "auth-1");
+    assert!(
+        ack["generation"].as_u64().expect("generation") > hello["generation"].as_u64().expect("g")
+    );
+
+    // Both tabs, the requester included, hear the new listing once.
+    let changed = wait_for_type(&mut first, "diffChanged", Duration::from_secs(15));
+    assert_eq!(keys(&changed), keys(&fixture("web-diff-changed.json")));
+    assert_eq!(changed["selected"]["name"], "auth-1");
+    assert_eq!(changed["generation"], ack["generation"]);
+    assert_eq!(paths_of(&changed), vec!["src/a.ts"]);
+    let changed = wait_for_type(&mut second, "diffChanged", Duration::from_secs(15));
+    assert_eq!(changed["selected"]["name"], "auth-1");
+    assert_eq!(paths_of(&changed), vec!["src/a.ts"]);
+
+    // A refresh from the other tab sees the shared selection.
+    let snapshot = request(&mut second, json!({"type": "refresh", "id": 2}));
+    assert_eq!(snapshot["selected"]["name"], "auth-1");
+    assert_eq!(paths_of(&snapshot), vec!["src/a.ts"]);
+
+    let err = request(
+        &mut first,
+        json!({"type": "target.select", "id": 14, "target": {"kind": "branch", "name": "auth-9"}}),
+    );
+    assert_eq!(err["type"], "error");
+    assert_eq!(err["id"], 14);
+    assert_eq!(err["code"], "unknownTarget");
+    let err = request(
+        &mut first,
+        json!({"type": "target.select", "id": 15, "target": {"kind": "tag"}}),
+    );
+    assert_eq!(err["code"], "decode");
+
+    let added = request(
+        &mut first,
+        json!({"type": "comment.add", "id": 16, "path": "src/a.ts", "line": 1, "body": "bravo??",
+               "target": {"kind": "branch", "name": "auth-1"}}),
+    );
+    assert_eq!(added["comment"]["target"]["name"], "auth-1");
+    assert_eq!(added["comment"]["snippet"], "const a = 'AUTH_ONE_BRAVO';");
+}

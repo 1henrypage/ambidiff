@@ -13,18 +13,24 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use ambidiff_core::anchor::TargetScope;
 use ambidiff_core::git_source::GitSource;
+use ambidiff_core::projection::{FileCounts, FileFilter, ReviewProjection};
 use ambidiff_core::protocol::{
     CommentAddRequest, CommentDeleteRequest, CommentEditRequest, LifecycleRequest,
 };
 use ambidiff_core::review::{Action, Actor, Comment, ReviewFile, Side, Source, Status};
 use ambidiff_core::sanitize::sanitize_line;
+use ambidiff_core::source::{CompareSpec, SourceMode};
+use ambidiff_core::stack::{Stack, TargetId};
 use ambidiff_core::store::Store;
 use ambidiff_core::sys::now_rfc3339;
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 
-use crate::application::{Application, Outcome, OutcomeValue, ReviewCommand};
+use crate::application::{
+    Application, Outcome, OutcomeValue, ReviewCommand, exclude_review_from_git,
+};
 use crate::args::{
     AgentSetupArgs, CommentAddArgs, CommentAddressedArgs, CommentEditArgs, CommentIdArgs,
     CommentListArgs, InitArgs, RevBumpArgs, StatusArgs,
@@ -74,8 +80,13 @@ fn comment_location(comment: &Comment) -> String {
 }
 
 fn print_comment_human(comment: &Comment) {
+    let target = comment
+        .target
+        .as_ref()
+        .map(|t| format!("  [{t}]"))
+        .unwrap_or_default();
     say(format!(
-        "{} {}  rev {}  {}  {}",
+        "{} {}  rev {}  {}  {}{target}",
         status_symbol(comment.status),
         comment.id,
         comment.rev,
@@ -114,26 +125,32 @@ pub fn init(args: InitArgs) -> Result<i32> {
         .clone()
         .unwrap_or_else(|| default_review_name(&root));
 
-    let source = if args.staged {
-        Source::git_staged(args.base.clone())
-    } else {
-        Source::git(args.base.clone())
+    let source = match args.source.source() {
+        Some(source) => source,
+        None if args.staged => Source::git_staged(args.base.clone()),
+        None => Source::git(args.base.clone()),
     };
+    // Preflight the comparison so a bad ref or a missing trunk fails
+    // before a review file exists.
+    match source.mode() {
+        SourceMode::Stack { upstream } => {
+            GitSource::discover_stack(&root, upstream.as_deref())
+                .with_context(|| format!("cannot review a stack at {}", root.display()))?;
+        }
+        SourceMode::Commit { spec } => {
+            GitSource::open_with(&root, CompareSpec::commit(spec.clone()))
+                .with_context(|| format!("cannot review commit {spec}"))?;
+        }
+        SourceMode::Worktree { .. } => {}
+    }
 
-    let review = ReviewFile::new(name.clone(), source, &now_rfc3339());
+    let review = ReviewFile::new(name.clone(), source.clone(), &now_rfc3339());
     store.init(&review)?;
 
     // Review state is never git-tracked. A failure here is reported, not
     // hidden: the review exists, and the user can fix the exclusion before
     // committing.
-    let mut warnings = Vec::new();
-    if GitSource::is_repo(&root)
-        && let Err(err) = GitSource::ensure_git_exclude(&root)
-    {
-        warnings.push(format!(
-            "could not add the review sidecars to .git/info/exclude: {err}"
-        ));
-    }
+    let warnings: Vec<String> = exclude_review_from_git(&root).into_iter().collect();
 
     if args.json {
         println!(
@@ -142,19 +159,50 @@ pub fn init(args: InitArgs) -> Result<i32> {
                 "review": name,
                 "root": root.display().to_string(),
                 "file": store.review_path().display().to_string(),
+                "source": source,
                 "warnings": warnings,
             })
         );
     } else {
         print_warnings(&warnings);
         say(format!(
-            "initialized review {:?} at {}",
+            "initialized review {:?} at {} ({})",
             name,
-            store.review_path().display()
+            store.review_path().display(),
+            source.describe()
         ));
         say("next: open `ambidiff`, or run `ambidiff agent-setup` to brief agents");
     }
     Ok(0)
+}
+
+/// Discovery outcome for `status` in stack mode: the stack, or the error
+/// that stopped discovery (printed, never fatal: the exit code follows the
+/// to-do count either way).
+enum StackStatus {
+    Stack(Stack),
+    Error(String),
+}
+
+fn short_oid(oid: &str) -> &str {
+    oid.get(..8).unwrap_or(oid)
+}
+
+/// The per-target picture `status` prints: counts for every live target,
+/// plus the comments no target owns (untargeted, and those whose target
+/// left the stack). Counts are independent of which live target the scope
+/// selects; `stack` (whether or not it is live) keeps `was-on` meaningful
+/// even for an empty stack.
+fn stack_counts<'a>(review: &'a ReviewFile, stack: &Stack) -> ReviewProjection<'a> {
+    let scope = TargetScope {
+        selected: Some(stack.default_target().unwrap_or(TargetId::Stack)),
+        live: stack.ids(),
+    };
+    ReviewProjection::scoped(review, &[], FileFilter::All, scope)
+}
+
+fn counts_json(counts: FileCounts) -> serde_json::Value {
+    json!({"todo": counts.todo, "total": counts.total})
 }
 
 pub fn status(args: StatusArgs) -> Result<i32> {
@@ -163,39 +211,122 @@ pub fn status(args: StatusArgs) -> Result<i32> {
     let review = &outcome.review;
     let counts = review.counts();
     let todo = counts.todo();
+    let mut warnings = outcome.warnings.clone();
+    if let Some(conflict) = review.source.conflict_warning() {
+        warnings.push(conflict);
+    }
+
+    let stack = match review.source.mode() {
+        SourceMode::Stack { upstream } => Some(
+            match GitSource::discover_stack(app.store().root(), upstream.as_deref()) {
+                Ok(stack) => StackStatus::Stack(stack),
+                Err(e) => StackStatus::Error(e.to_string()),
+            },
+        ),
+        _ => None,
+    };
 
     if args.json {
-        println!(
-            "{}",
-            json!({
-                "review": review.review,
-                "revision": review.revision,
-                "source": review.source,
-                "counts": {
-                    "open": counts.open,
-                    "addressed": counts.addressed,
-                    "resolved": counts.resolved,
-                    "reopened": counts.reopened,
-                },
-                "todo": todo,
-                "quarantined": review.quarantined.len(),
-                "readOnly": outcome.read_only,
-                "readOnlyReason": outcome.read_only_reason,
-                "warnings": outcome.warnings,
-            })
-        );
+        let mut doc = json!({
+            "review": review.review,
+            "revision": review.revision,
+            "source": review.source,
+            "counts": {
+                "open": counts.open,
+                "addressed": counts.addressed,
+                "resolved": counts.resolved,
+                "reopened": counts.reopened,
+            },
+            "todo": todo,
+            "quarantined": review.quarantined.len(),
+            "readOnly": outcome.read_only,
+            "readOnlyReason": outcome.read_only_reason,
+            "warnings": warnings,
+        });
+        match &stack {
+            Some(StackStatus::Stack(stack)) => {
+                let projection = stack_counts(review, stack);
+                let targets: Vec<serde_json::Value> = stack
+                    .targets
+                    .iter()
+                    .zip(projection.target_counts())
+                    .map(|(target, tally)| {
+                        let mut v = serde_json::to_value(target).unwrap_or_default();
+                        v["counts"] = counts_json(tally.counts);
+                        v
+                    })
+                    .collect();
+                doc["stack"] = json!({
+                    "trunk": stack.trunk,
+                    "base": stack.base,
+                    "head": stack.head,
+                    "targets": targets,
+                });
+                doc["untargeted"] = counts_json(projection.untargeted());
+                doc["wasOn"] = counts_json(projection.was_on());
+                doc["stackError"] = serde_json::Value::Null;
+            }
+            Some(StackStatus::Error(error)) => {
+                doc["stack"] = serde_json::Value::Null;
+                doc["untargeted"] = serde_json::Value::Null;
+                doc["wasOn"] = serde_json::Value::Null;
+                doc["stackError"] = json!(error);
+            }
+            None => {}
+        }
+        println!("{doc}");
     } else {
-        print_warnings(&outcome.warnings);
-        let base = review
-            .source
-            .base
-            .as_deref()
-            .map(|b| format!(" base {b}"))
-            .unwrap_or_default();
+        print_warnings(&warnings);
         say(format!(
-            "review {:?}  rev {}  {}{base}",
-            review.review, review.revision, review.source.kind
+            "review {:?}  rev {}  {}",
+            review.review,
+            review.revision,
+            review.source.describe()
         ));
+        match &stack {
+            Some(StackStatus::Stack(stack)) => {
+                let projection = stack_counts(review, stack);
+                say(format!(
+                    "  trunk {}  base {}  head {}",
+                    stack.trunk,
+                    short_oid(&stack.base),
+                    short_oid(&stack.head)
+                ));
+                if stack.targets.is_empty() {
+                    say("  (the stack is empty: HEAD is at trunk and the tree is clean)");
+                }
+                for (target, tally) in stack.targets.iter().zip(projection.target_counts()) {
+                    let position = target.position.map(|p| p.to_string()).unwrap_or_default();
+                    let oid = target.tip.as_deref().map(short_oid).unwrap_or("");
+                    let aliases = if target.aliases.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  (also: {})", target.aliases.join(", "))
+                    };
+                    let subject = target
+                        .subject
+                        .as_deref()
+                        .map(|s| format!("  {s}"))
+                        .unwrap_or_default();
+                    say(format!(
+                        "  {position:>2} {:<18} {oid:<8} {:>3}c  {}{}/{}{subject}{aliases}",
+                        target.label,
+                        target.commit_count,
+                        status_symbol(Status::Open),
+                        tally.counts.todo,
+                        tally.counts.total,
+                    ));
+                }
+                let untargeted = projection.untargeted();
+                let was_on = projection.was_on();
+                say(format!(
+                    "  untargeted {}/{}   was-on {}/{}",
+                    untargeted.todo, untargeted.total, was_on.todo, was_on.total
+                ));
+            }
+            Some(StackStatus::Error(error)) => say(format!("  ! stack: {error}")),
+            None => {}
+        }
         say(format!(
             "  {} {} open   {} {} reopened   {} {} addressed   {} {} resolved",
             status_symbol(Status::Open),
@@ -227,6 +358,11 @@ pub fn status(args: StatusArgs) -> Result<i32> {
     Ok(if todo > 0 { EXIT_TODO } else { 0 })
 }
 
+fn parse_target(spec: Option<&str>) -> Result<Option<TargetId>> {
+    spec.map(|s| TargetId::parse_cli(s).map_err(|e| anyhow::anyhow!("--target: {e}")))
+        .transpose()
+}
+
 pub fn comment_add(args: CommentAddArgs) -> Result<i32> {
     let side = match args.side.as_deref() {
         Some("old") => Some(Side::Old),
@@ -238,7 +374,7 @@ pub fn comment_add(args: CommentAddArgs) -> Result<i32> {
         side,
         line: args.line,
         end_line: args.end_line,
-        target: None,
+        target: parse_target(args.target.as_deref())?,
         body: args.body.clone(),
         author: args.author.clone(),
     };
@@ -270,6 +406,7 @@ pub fn comment_list(args: CommentListArgs) -> Result<i32> {
         (None, true) => Some(vec![Status::Open, Status::Reopened]),
         (None, false) => None,
     };
+    let target = parse_target(args.target.as_deref())?;
 
     let comments: Vec<&Comment> = outcome
         .review
@@ -285,6 +422,7 @@ pub fn comment_list(args: CommentListArgs) -> Result<i32> {
                 .as_deref()
                 .is_none_or(|path| c.path.as_deref() == Some(path))
         })
+        .filter(|c| target.as_ref().is_none_or(|t| c.target.as_ref() == Some(t)))
         .collect();
 
     if args.json {
@@ -404,7 +542,7 @@ pub fn rev_bump(args: RevBumpArgs) -> Result<i32> {
 
 /// Version marker inside the BEGIN line; bump when the block content
 /// changes so `--check` can detect stale installs.
-const AGENT_BLOCK_VERSION: u32 = 2;
+const AGENT_BLOCK_VERSION: u32 = 3;
 
 fn agent_block() -> String {
     format!(
@@ -432,6 +570,11 @@ loop with the `ambidiff` CLI rather than editing that file directly.\n\
   -m \"...\" --author agent`.\n\
 - A line comment's `snippet` is the code as it looked when the comment was\n\
   written; if lines have moved, find the code by content, not line number.\n\
+- In a stack review (`source.stack` in `ambidiff status --json`) a to-do\n\
+  carries `target`: for a `branch` target, fold the fix into the commit at\n\
+  that branch (its current oid is the target's `tip` in `status --json`)\n\
+  and restack the branches above it with your stack tooling. Findings you\n\
+  add there need `--target <branch>`.\n\
 \n\
 When nothing is left in the to-do list, stop and report back; the human\n\
 re-reviews from there.\n\

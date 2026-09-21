@@ -21,6 +21,8 @@ import type {
   ProjectionSnapshot,
   SearchMatch,
   Status,
+  TargetCounts,
+  TargetId,
   ThemeWire,
   ViewMode,
 } from "../protocol";
@@ -67,6 +69,10 @@ function placeholderView(path: string, kind: { kind: "binary"; desc: string } | 
 export class FakeCore implements Core {
   files: FileEntry[] = [];
   generation = 0;
+  /** Every `setTargets` call, newest last. */
+  targetScopes: { targets: TargetId[]; selected: TargetId | null }[] = [];
+  /** What `projection()` reports as `targetCounts`. */
+  targetCounts: TargetCounts[] = [];
   views = new Map<string, FileView>();
   commentsByPath = new Map<string, FileProjectionResult["comments"]>();
   overviewComments: OverviewCommentOwned[] = [];
@@ -107,6 +113,10 @@ export class FakeCore implements Core {
     return this.generation;
   }
 
+  setTargets(scope: { targets: TargetId[]; selected: TargetId | null }): void {
+    this.targetScopes.push(scope);
+  }
+
   setViewOptions(mode: ViewMode, wordDiff: boolean, theme: ThemeWire): void {
     this.optionsApplied.push({ mode, wordDiff, theme });
   }
@@ -145,6 +155,10 @@ export class FakeCore implements Core {
       reviewLevelComments: this.overviewComments.filter((c) => !c.unattached).length,
       unattachedComments: this.overviewComments.filter((c) => c.unattached).length,
       overview: this.overviewComments,
+      selected: this.targetScopes.at(-1)?.selected ?? null,
+      targetCounts: this.targetCounts,
+      untargetedComments: 0,
+      wasOnComments: this.overviewComments.filter((c) => c.wasOn !== null).length,
     };
   }
 

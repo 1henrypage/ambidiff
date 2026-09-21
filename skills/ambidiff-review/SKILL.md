@@ -25,6 +25,12 @@ conversation, to resolve a comment or bump the revision yourself - see
    - A body containing `??` is a QUESTION. Answer it in the response
      instead of changing code, unless the answer itself implies a fix.
    - Otherwise make the change it asks for.
+   - In a stack review (`source.stack` in `ambidiff status --json`) each
+     to-do carries `target`. For `{"kind": "branch", "name": "<branch>"}`
+     fold the fix into the commit at that branch (its current oid is that
+     target's `tip` in `status --json`) and restack the branches above it
+     with your stack tooling; `stack` and `head` targets are fixed at
+     `HEAD`, `worktree` in the working tree.
    - `ambidiff comment addressed <id> -m "one line on what you did"`
 4. When `ambidiff comment list --todo --json` is empty, stop and report
    back. The human re-reviews and either resolves or reopens with
@@ -41,7 +47,8 @@ conversation, to resolve a comment or bump the revision yourself - see
 - You may add findings of your own while working:
   `ambidiff comment add -p <file> -l <line> -m "..." --author agent`
   (removed lines take `--side old`; added and unchanged lines default to
-  the new side).
+  the new side). In a stack review add `--target <branch>` naming the PR
+  the finding belongs to; it is required for path comments there.
 - If a comment is unclear, mark it addressed with a response asking for
   clarification rather than guessing at a large change.
 
@@ -68,4 +75,7 @@ or "bump the revision". Rules for using this exception:
   (human, or you when explicitly told to resolve).
 - `rev` on a comment is the review pass it was raised in; the file's
   `revision` is the current pass.
+- `target` on a comment (stack reviews) names the PR branch, `head`,
+  `stack`, or `worktree` it was made against; a branch is identified by
+  its name, never by a commit oid.
 - All verbs accept `--json` and print stable schemas.

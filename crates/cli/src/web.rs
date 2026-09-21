@@ -22,16 +22,24 @@
 //! The native side owns fs/git/watch and pushes RAW diff text plus review
 //! JSON; the wasm core in the page computes rows/spans/anchors/search with
 //! the same code the TUI runs (the drift firewall extends to the browser).
+//!
+//! Stack target selection is per server process: every tab of one
+//! `ambidiff web` shares the one [`Application`] (one git source, one
+//! watch), so a `target.select` from any tab is acknowledged to that tab
+//! (`targetSelected`) and then broadcast to every tab as a `diffChanged`,
+//! published while the application lock is still held so no tab can read
+//! the old listing under the new generation.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ambidiff_core::git_source::RawDiff;
 use ambidiff_core::protocol::{
     decode_comment_add, decode_comment_delete, decode_comment_edit, decode_lifecycle,
+    decode_target_select,
 };
 use ambidiff_core::review::{Action, Actor, Side};
 use ambidiff_core::sanitize::sanitize_line;
@@ -45,7 +53,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::application::{AppError, Application, OutcomeValue, ReviewCommand};
 use crate::args::WebArgs;
-use crate::context::resolve_store;
+use crate::context::open_application;
 
 static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../web/dist");
 
@@ -64,6 +72,7 @@ pub const MESSAGE_TYPES: &[&str] = &[
     "comment.reopen",
     "comment.resolveAddressed",
     "rev.bump",
+    "target.select",
 ];
 
 /// Concurrent connections served; the rest get 503 until permits return.
@@ -86,13 +95,12 @@ const BROADCAST_POLL: Duration = Duration::from_millis(100);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 pub fn run(args: WebArgs) -> Result<i32> {
-    let store = resolve_store()?;
+    let mut app = open_application(&args.source)?;
     let listener = TcpListener::bind(("127.0.0.1", args.port)).context("bind loopback listener")?;
     let port = listener.local_addr()?.port();
     let token = generate_token().context("generate session token")?;
     let url = format!("http://127.0.0.1:{port}/#t={token}");
 
-    let mut app = Application::open(store);
     // Arm BEFORE the held load (the absorbed-write race).
     if let Err(err) = app.start_watch() {
         warn(&format!("watch not started: {err}"));
@@ -100,8 +108,8 @@ pub fn run(args: WebArgs) -> Result<i32> {
     if let Err(err) = app.load() {
         warn(&format!("initial load failed: {err}"));
     }
+    let broadcast = Arc::new(Broadcast::new(app.generation()));
     let app = Arc::new(Mutex::new(app));
-    let broadcast = Arc::new(Broadcast::default());
     start_broadcast(&app, &broadcast);
 
     println!("ambidiff web at {url}");
@@ -213,9 +221,13 @@ fn token_matches(expected: &str, got: &str) -> bool {
 
 /// Latest payload per notification kind with an epoch; subscribers keep
 /// the epochs they have delivered, so a burst collapses to one message.
+/// `diff_generation` is the application generation the last `diffChanged`
+/// described, shared by the broadcast thread and request handlers that
+/// publish directly, so a bump is announced exactly once.
 #[derive(Default)]
 struct Broadcast {
     inner: Mutex<BroadcastState>,
+    diff_generation: AtomicU64,
 }
 
 #[derive(Default)]
@@ -234,16 +246,30 @@ struct Seen {
 }
 
 impl Broadcast {
+    fn new(generation: u64) -> Broadcast {
+        Broadcast {
+            inner: Mutex::new(BroadcastState::default()),
+            diff_generation: AtomicU64::new(generation),
+        }
+    }
+
     fn publish_review(&self, msg: String) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.review_epoch += 1;
         inner.review_msg = Some(msg);
     }
 
-    fn publish_diff(&self, msg: String) {
+    /// Publish a diff change describing application `generation`.
+    fn publish_diff(&self, msg: String, generation: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.diff_epoch += 1;
         inner.diff_msg = Some(msg);
+        self.diff_generation.store(generation, Ordering::SeqCst);
+    }
+
+    /// The generation the latest published diff change described.
+    fn diff_generation(&self) -> u64 {
+        self.diff_generation.load(Ordering::SeqCst)
     }
 
     /// Payloads newer than `seen`, and the cursor after delivering them.
@@ -292,7 +318,6 @@ fn start_broadcast(app: &Arc<Mutex<Application>>, broadcast: &Arc<Broadcast>) {
             if !pending.review && !pending.diff {
                 continue;
             }
-            let before = app.generation();
             let loaded = if pending.diff {
                 app.refresh().map(|_| ())
             } else {
@@ -304,10 +329,12 @@ fn start_broadcast(app: &Arc<Mutex<Application>>, broadcast: &Arc<Broadcast>) {
             if pending.review {
                 broadcast.publish_review(review_changed(&app).to_string());
             }
-            // A `source` change reconfigures the comparison and bumps the
-            // generation: publish it as a diff change too.
-            if pending.diff || app.generation() != before {
-                broadcast.publish_diff(diff_changed(&app).to_string());
+            // A `source` change or a target selection reconfigures the
+            // comparison and bumps the generation: publish it as a diff
+            // change too, unless a handler already announced this
+            // generation.
+            if pending.diff || app.generation() != broadcast.diff_generation() {
+                broadcast.publish_diff(diff_changed(&app).to_string(), app.generation());
             }
         }
     });
@@ -341,6 +368,9 @@ fn snapshot_message(app: &Application, kind: &str, id: Option<&Value>) -> Value 
             msg["sourceError"] = json!(snapshot.source_error);
             msg["skipped"] = json!(snapshot.skipped);
             msg["comparison"] = json!(snapshot.comparison);
+            msg["targets"] = json!(snapshot.targets);
+            msg["selected"] = json!(snapshot.selected);
+            msg["commit"] = json!(snapshot.commit);
             msg["generation"] = json!(snapshot.generation);
         }
         None => {
@@ -352,6 +382,9 @@ fn snapshot_message(app: &Application, kind: &str, id: Option<&Value>) -> Value 
             msg["sourceError"] = json!(null);
             msg["skipped"] = json!([]);
             msg["comparison"] = json!(null);
+            msg["targets"] = json!([]);
+            msg["selected"] = json!(null);
+            msg["commit"] = json!(null);
             msg["generation"] = json!(app.generation());
             msg["loadError"] = json!("review not loaded");
         }
@@ -392,6 +425,9 @@ fn diff_changed(app: &Application) -> Value {
             "skipped": s.skipped,
             "sourceError": s.source_error,
             "comparison": s.comparison,
+            "targets": s.targets,
+            "selected": s.selected,
+            "commit": s.commit,
             "generation": s.generation,
         }),
         None => json!({
@@ -400,6 +436,9 @@ fn diff_changed(app: &Application) -> Value {
             "skipped": [],
             "sourceError": "review not loaded",
             "comparison": null,
+            "targets": [],
+            "selected": null,
+            "commit": null,
             "generation": app.generation(),
         }),
     }
@@ -817,6 +856,7 @@ fn handle_client_message(state: &ServerState, text: &str) -> Value {
             },
         ),
         "rev.bump" => execute(state, ReviewCommand::RevBump),
+        "target.select" => target_select(state, &request),
         // `auth` is only valid as the first message.
         other => {
             return error_message(
@@ -879,6 +919,27 @@ fn get_src(state: &ServerState, request: &Value) -> Result<Value, AppError> {
             reason: format!("cannot read {path:?}"),
         })?;
     Ok(json!({"type": "src", "path": path, "content": content}))
+}
+
+/// Select the server's stack target. The reply is an acknowledgement (not
+/// a snapshot, so the requesting tab does not apply the files twice); the
+/// new listing reaches every tab, this one included, as the `diffChanged`
+/// published here while the lock is held.
+fn target_select(state: &ServerState, request: &Value) -> Result<Value, AppError> {
+    let req = decode_target_select(request)?;
+    let mut app = state.app.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = app.select_target(req.target)?;
+    let reply = json!({
+        "type": "targetSelected",
+        "selected": snapshot.selected,
+        "targets": snapshot.targets,
+        "comparison": snapshot.comparison,
+        "generation": snapshot.generation,
+    });
+    state
+        .broadcast
+        .publish_diff(diff_changed(&app).to_string(), app.generation());
+    Ok(reply)
 }
 
 fn lifecycle(
@@ -1005,11 +1066,12 @@ mod tests {
 
     #[test]
     fn broadcast_cell_coalesces_and_delivers_once() {
-        let cell = Broadcast::default();
+        let cell = Broadcast::new(0);
         let mut seen = cell.cursor();
         cell.publish_review("r1".into());
         cell.publish_review("r2".into());
-        cell.publish_diff("d1".into());
+        cell.publish_diff("d1".into(), 3);
+        assert_eq!(cell.diff_generation(), 3);
         let (payloads, next) = cell.since(seen);
         assert_eq!(payloads, vec!["r2".to_string(), "d1".to_string()]);
         seen = next;

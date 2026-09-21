@@ -173,8 +173,8 @@ describe("display model", () => {
     const display = buildDisplay({
       kind: "overview",
       comments: [
-        { comment: { ...comment("c-r", null), path: null }, anchor: null, wasPath: null, unattached: false },
-        { comment: { ...comment("c-u", 3), snippet: "gone()" }, anchor: null, wasPath: null, unattached: true },
+        { comment: { ...comment("c-r", null), path: null }, anchor: null, wasPath: null, unattached: false, wasOn: null },
+        { comment: { ...comment("c-u", 3), snippet: "gone()" }, anchor: null, wasPath: null, unattached: true, wasOn: null },
       ],
     });
     const kinds = display.map((d) => d.kind);
@@ -187,7 +187,7 @@ describe("display model", () => {
     const display = buildDisplay({
       kind: "overview",
       comments: [
-        { comment: { ...comment("c-r", null), path: null, response: "all done" }, anchor: null, wasPath: null, unattached: false },
+        { comment: { ...comment("c-r", null), path: null, response: "all done" }, anchor: null, wasPath: null, unattached: false, wasOn: null },
       ],
     });
     const clines = display.filter((d): d is Extract<typeof d, { kind: "cline" }> => d.kind === "cline");
@@ -205,7 +205,7 @@ describe("display model", () => {
     const display = buildDisplay({
       kind: "overview",
       comments: [
-        { comment: { ...comment("c-long", null), path: null, body: longBody }, anchor: null, wasPath: null, unattached: false },
+        { comment: { ...comment("c-long", null), path: null, body: longBody }, anchor: null, wasPath: null, unattached: false, wasOn: null },
       ],
     });
     const clines = display.filter((d) => d.kind === "cline");

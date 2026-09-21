@@ -14,9 +14,24 @@
 //! review's `source` configuration reconfigures the git source and the
 //! watch signature together and bumps the generation, so every cached view
 //! is reloaded against the new comparison.
+//!
+//! Stacks: the selected target is PER PROCESS (this struct's `selected`),
+//! never written to the review file. Selecting a target rebuilds the git
+//! source exactly like a `source` change does; every dirty load in stack
+//! mode re-resolves the stack so a restack (tips moved, a PR merged away)
+//! refreshes the target strip. A selection whose branch left the stack
+//! falls back to the whole-stack target with a warning, never to a
+//! neighbouring PR.
+//!
+//! Unsaved reviews: `ambidiff --commit X` / `--stack` open without a review
+//! file (`open_ephemeral`); the pending review is served as if loaded and
+//! the first mutation creates `.ambidiff.json` (with the git exclusions),
+//! after which the store is the only truth.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
+use ambidiff_core::anchor::TargetScope;
 #[cfg(test)]
 use ambidiff_core::commands::{COMMANDS, CommandSpec};
 use ambidiff_core::git_source::{GitSource, RawDiff};
@@ -27,19 +42,28 @@ use ambidiff_core::protocol::{
 };
 use ambidiff_core::review::{
     Action, Actor, Comment, LoadOutcome, ReviewError, ReviewFile, Side, Source,
-    validate_new_comment,
+    validate_comment_target, validate_new_comment,
 };
-use ambidiff_core::source::{Comparison, DiffSource, FileDiffRequest, SkippedPath, SourceError};
+use ambidiff_core::source::{
+    CommitSummary, CompareSpec, Comparison, DiffSource, FileDiffRequest, SkippedPath, SourceError,
+    SourceMode,
+};
+use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::store::{Store, StoreError};
 use ambidiff_core::sys::{generate_comment_id, now_rfc3339};
 use ambidiff_core::view::ViewOptions;
 use ambidiff_core::view_state::{ExpandError, ExpansionResult, ViewState};
-use ambidiff_core::watch::{Refresh, SignatureFn, WatchConfig, WatchController};
+use ambidiff_core::watch::{
+    Refresh, SignatureFn, WatchConfig, WatchController, review_file_signature,
+};
 
 use crate::context::resolve_author;
 
 /// Context lines requested from the source for every served view.
 pub const CONTEXT: u32 = 3;
+
+/// The warning an unsaved review carries until its first mutation.
+pub const UNSAVED_WARNING: &str = "unsaved review: the first comment creates .ambidiff.json";
 
 /// The last valid state every transport serves from.
 #[derive(Debug, Clone)]
@@ -55,6 +79,14 @@ pub struct Snapshot {
     /// opened); `files` then holds the previous listing.
     pub source_error: Option<String>,
     pub comparison: Option<Comparison>,
+    /// The stack's targets in order (empty outside stack reviews).
+    pub targets: Vec<Target>,
+    /// The target this process is looking at (`None` outside stacks).
+    pub selected: Option<TargetId>,
+    /// The trunk the stack sits on (stack reviews only).
+    pub trunk: Option<String>,
+    /// The reviewed commit (single-commit reviews only).
+    pub commit: Option<CommitSummary>,
     /// Bumped on every diff refresh and source reconfiguration; views built
     /// at an older generation must reload.
     pub generation: u64,
@@ -65,8 +97,24 @@ impl Snapshot {
         self.files.iter().find(|e| e.path == path)
     }
 
+    /// The target scope every projection of this snapshot uses.
+    pub fn scope(&self) -> TargetScope {
+        TargetScope {
+            selected: self.selected.clone(),
+            live: self.targets.iter().map(|t| t.id.clone()).collect(),
+        }
+    }
+
     pub fn projection(&self, filter: FileFilter) -> ReviewProjection<'_> {
-        ReviewProjection::new(&self.review, &self.files, filter)
+        ReviewProjection::scoped(&self.review, &self.files, filter, self.scope())
+    }
+
+    pub fn is_stack(&self) -> bool {
+        self.review.source.is_stack()
+    }
+
+    pub fn target(&self, id: &TargetId) -> Option<&Target> {
+        self.targets.iter().find(|t| &t.id == id)
     }
 }
 
@@ -132,6 +180,10 @@ pub enum AppError {
     NoSource { reason: String },
     #[error("review not loaded")]
     NotLoaded,
+    #[error("this review is not a stack review; there is no target to select")]
+    NotStackReview,
+    #[error("target {target} is not in the stack")]
+    UnknownTarget { target: String },
 }
 
 impl From<StoreError> for AppError {
@@ -162,47 +214,59 @@ impl AppError {
             AppError::NotInChangedSet { .. } => "notInChangedSet",
             AppError::NoSource { .. } => "noSource",
             AppError::NotLoaded => "notLoaded",
+            AppError::NotStackReview => "notStackReview",
+            AppError::UnknownTarget { .. } => "unknownTarget",
         }
     }
 
     /// True for the caller's fault (bad payload, unknown id, illegal
-    /// transition, unsafe path, unknown file or gap): transports answer with
-    /// their invalid-input code instead of an internal error.
+    /// transition, unsafe path, unknown file, gap, or target): transports
+    /// answer with their invalid-input code instead of an internal error.
     pub fn is_invalid_input(&self) -> bool {
         matches!(
             self.kind(),
-            "decode" | "review" | "invalidPath" | "notInChangedSet" | "noSuchGap"
+            "decode"
+                | "review"
+                | "invalidPath"
+                | "notInChangedSet"
+                | "noSuchGap"
+                | "notStackReview"
+                | "unknownTarget"
         )
     }
 }
 
-/// The parts of `source` that select a git comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceKey {
-    kind: String,
-    base: Option<String>,
-    staged: bool,
+/// Add the review file and its sidecars to `.git/info/exclude` when `root`
+/// is a git working tree. A failure is reported as a warning, never hidden:
+/// the review exists, and the user can fix the exclusion before committing.
+pub fn exclude_review_from_git(root: &Path) -> Option<String> {
+    if !GitSource::is_repo(root) {
+        return None;
+    }
+    GitSource::ensure_git_exclude(root)
+        .err()
+        .map(|err| format!("could not add the review sidecars to .git/info/exclude: {err}"))
 }
 
-impl SourceKey {
-    fn of(source: &Source) -> SourceKey {
-        SourceKey {
-            kind: source.kind.clone(),
-            base: source.base.clone().filter(|b| !b.is_empty()),
-            staged: source
-                .extra
-                .get("staged")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        }
-    }
+/// What the git source is currently built for: the review's source kind
+/// and the resolved comparison spec (including the per-process target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Configured {
+    kind: String,
+    spec: CompareSpec,
 }
 
 pub struct Application {
     store: Store,
     source: Option<GitSource>,
-    source_key: Option<SourceKey>,
+    configured: Option<Configured>,
     source_error: Option<String>,
+    /// Warnings from the last source (re)open, e.g. a target fallback.
+    source_warnings: Vec<String>,
+    /// The stack target this process looks at; never persisted.
+    selected: Option<TargetId>,
+    /// An unsaved review, served until the first mutation creates the file.
+    pending: Option<ReviewFile>,
     watch: Option<WatchController>,
     generation: u64,
     diff_dirty: bool,
@@ -215,13 +279,25 @@ impl Application {
         Application {
             store,
             source: None,
-            source_key: None,
+            configured: None,
             source_error: None,
+            source_warnings: Vec::new(),
+            selected: None,
+            pending: None,
             watch: None,
             generation: 0,
             diff_dirty: true,
             snapshot: None,
         }
+    }
+
+    /// Open on a root that has no review file yet: `review` is served as
+    /// the loaded review (with [`UNSAVED_WARNING`]) and the first mutation
+    /// creates `.ambidiff.json` from it.
+    pub fn open_ephemeral(store: Store, review: ReviewFile) -> Application {
+        let mut app = Application::open(store);
+        app.pending = Some(review);
+        app
     }
 
     pub fn store(&self) -> &Store {
@@ -236,17 +312,18 @@ impl Application {
         self.generation
     }
 
+    /// True while the review has not been written to disk yet.
+    pub fn is_unsaved(&self) -> bool {
+        self.pending.is_some() && !self.store.exists()
+    }
+
     pub fn last_diff_error(&self) -> Option<String> {
         self.watch.as_ref().and_then(|w| w.last_diff_error())
     }
 
     fn review_signature_fn(&self) -> SignatureFn {
         let path = self.store.review_path();
-        std::sync::Arc::new(move || {
-            std::fs::read(&path)
-                .map(|bytes| ambidiff_core::util::fnv1a64(&bytes))
-                .map_err(|e| format!("read {}: {e}", path.display()))
-        })
+        std::sync::Arc::new(move || review_file_signature(&path))
     }
 
     fn diff_signature_fn(&self) -> SignatureFn {
@@ -264,6 +341,31 @@ impl Application {
         }
     }
 
+    fn swap_watch_signature(&self) {
+        if let Some(watch) = &self.watch {
+            watch.set_diff_signature(self.diff_signature_fn());
+        }
+    }
+
+    /// The review as the store has it, or the pending (unsaved) review
+    /// when the file does not exist yet.
+    fn load_outcome(&self) -> Result<LoadOutcome, AppError> {
+        match self.store.load() {
+            Ok(outcome) => Ok(outcome),
+            Err(StoreError::NotInitialized { .. }) if self.pending.is_some() => {
+                let review = self.pending.clone().expect("checked");
+                Ok(LoadOutcome {
+                    review,
+                    warnings: vec![UNSAVED_WARNING.to_string()],
+                    read_only: false,
+                    read_only_reason: None,
+                    retained: Default::default(),
+                })
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Arm the watch: an unheld pre-read of the review selects the source,
     /// then the controller baselines both signatures synchronously. Must run
     /// BEFORE `load` so a write in between is detected, never absorbed.
@@ -271,7 +373,7 @@ impl Application {
         if self.watch.is_some() {
             return Ok(());
         }
-        let outcome = self.store.load()?;
+        let outcome = self.load_outcome()?;
         self.reconfigure(&outcome.review.source);
         let config = WatchConfig::new(self.store.root().to_path_buf(), self.store.review_path());
         let controller = WatchController::start_checked(
@@ -283,44 +385,114 @@ impl Application {
         Ok(())
     }
 
-    /// Rebuild the git source for a (changed) source configuration, swap the
-    /// watch's diff signature synchronously, and mark the diff dirty. Errors
-    /// become `source_error`; there is never a silent fallback.
-    fn reconfigure(&mut self, source: &Source) {
-        let key = SourceKey::of(source);
-        if self.source_key.as_ref() == Some(&key) {
-            return;
+    /// Rebuild the git source when the review's source configuration (or
+    /// this process's target selection) changed, swap the watch's diff
+    /// signature synchronously, and mark the diff dirty. Returns whether a
+    /// rebuild happened. Errors become `source_error`; there is never a
+    /// silent fallback.
+    fn reconfigure(&mut self, source: &Source) -> bool {
+        let key = Configured {
+            kind: source.kind.clone(),
+            spec: CompareSpec::from_source(source, self.selected.clone()),
+        };
+        if self.configured.as_ref() == Some(&key) {
+            return false;
         }
+        self.configured = Some(key);
+        self.reopen_source();
+        self.diff_dirty = true;
+        true
+    }
+
+    /// (Re)open the git source for the current configuration. In stack
+    /// mode a selected target that left the stack falls back to the
+    /// whole-stack target (never a neighbouring PR) with a warning; the
+    /// resolved selection is adopted as this process's selection.
+    fn reopen_source(&mut self) {
+        let Some(configured) = self.configured.clone() else {
+            return;
+        };
         let root = self.store.root().to_path_buf();
-        let (git, error) = if key.kind != "git" {
+        self.source_warnings.clear();
+        let (git, error) = if configured.kind != "git" {
             (
                 None,
-                Some(format!("unsupported source kind {:?}", key.kind)),
+                Some(format!("unsupported source kind {:?}", configured.kind)),
             )
         } else if !GitSource::is_repo(&root) {
             (None, Some("not a git repository".to_string()))
         } else {
-            match GitSource::open(&root, key.base.clone(), key.staged) {
+            match GitSource::open_with(&root, configured.spec.clone()) {
                 Ok(git) => (Some(git), None),
+                Err(SourceError::TargetNotInStack { target }) => {
+                    self.open_fallback_target(&root, &configured.spec, &target)
+                }
                 Err(e) => (None, Some(e.to_string())),
             }
         };
+        if let Some(git) = &git
+            && let Some(selected) = git.selected_target()
+        {
+            self.selected = Some(selected.clone());
+            if let Some(configured) = &mut self.configured {
+                configured.spec.target = Some(selected.clone());
+            }
+        }
         self.source = git;
         self.source_error = error;
-        self.source_key = Some(key);
-        self.diff_dirty = true;
-        if let Some(watch) = &self.watch {
-            watch.set_diff_signature(self.diff_signature_fn());
+        self.swap_watch_signature();
+    }
+
+    fn open_fallback_target(
+        &mut self,
+        root: &Path,
+        spec: &CompareSpec,
+        gone: &str,
+    ) -> (Option<GitSource>, Option<String>) {
+        let upstream = match &spec.mode {
+            SourceMode::Stack { upstream } => upstream.clone(),
+            _ => None,
+        };
+        let fallback = match GitSource::discover_stack(root, upstream.as_deref()) {
+            Ok(stack) => match stack.fallback_target() {
+                Some(target) => target,
+                None => {
+                    return (
+                        None,
+                        Some(SourceError::EmptyStack { trunk: stack.trunk }.to_string()),
+                    );
+                }
+            },
+            Err(e) => return (None, Some(e.to_string())),
+        };
+        match GitSource::open_with(root, CompareSpec::stack(upstream, Some(fallback.clone()))) {
+            Ok(git) => {
+                self.source_warnings
+                    .push(format!("target {gone} left the stack; showing {fallback}"));
+                (Some(git), None)
+            }
+            Err(e) => (None, Some(e.to_string())),
         }
+    }
+
+    fn is_stack_configured(&self) -> bool {
+        self.configured
+            .as_ref()
+            .is_some_and(|c| c.kind == "git" && c.spec.is_stack())
     }
 
     /// Take the held snapshot: the review (errors keep the previous
     /// snapshot), the source reconfigured when its configuration changed,
     /// and the listing re-taken when the diff is dirty (a listing failure
-    /// keeps the previous files and records the error).
+    /// keeps the previous files and records the error). In stack mode a
+    /// dirty load also re-resolves the stack, so the targets follow a
+    /// restack.
     pub fn load(&mut self) -> Result<&Snapshot, AppError> {
-        let outcome = self.store.load()?;
-        self.reconfigure(&outcome.review.source);
+        let outcome = self.load_outcome()?;
+        let reopened = self.reconfigure(&outcome.review.source);
+        if self.diff_dirty && !reopened && self.is_stack_configured() {
+            self.reopen_source();
+        }
 
         let previous = self.snapshot.take();
         let (files, skipped, source_error, generation) = match previous {
@@ -343,19 +515,42 @@ impl Application {
             }
         };
         let comparison = self.source.as_ref().map(|s| s.comparison().clone());
+        let (targets, selected, trunk) = match self.source.as_ref().and_then(|s| s.stack()) {
+            Some(stack) => (
+                stack.targets.clone(),
+                self.source
+                    .as_ref()
+                    .and_then(|s| s.selected_target().cloned()),
+                Some(stack.trunk.clone()),
+            ),
+            None => (Vec::new(), None, None),
+        };
+        let commit = self
+            .source
+            .as_ref()
+            .and_then(|s| s.commit_summary().cloned());
         // A listing can succeed while the watch's signature computation
         // fails (a git deadline under load): surface that too, so the
         // frontends never show a silent stale state.
         let source_error = source_error.or_else(|| self.last_diff_error());
+        let mut warnings = outcome.warnings;
+        if let Some(conflict) = outcome.review.source.conflict_warning() {
+            warnings.push(conflict);
+        }
+        warnings.extend(self.source_warnings.iter().cloned());
         self.snapshot = Some(Snapshot {
             review: outcome.review,
-            warnings: outcome.warnings,
+            warnings,
             read_only: outcome.read_only,
             read_only_reason: outcome.read_only_reason,
             files,
             skipped,
             source_error,
             comparison,
+            targets,
+            selected,
+            trunk,
+            commit,
             generation,
         });
         Ok(self.snapshot.as_ref().expect("just set"))
@@ -364,11 +559,30 @@ impl Application {
     /// The review alone, salvage-mode, zero git: for `status`, `list`,
     /// `show`, and review-only broadcasts.
     pub fn load_review(&self) -> Result<LoadOutcome, AppError> {
-        Ok(self.store.load()?)
+        self.load_outcome()
     }
 
     /// Force a diff re-listing on the next load (manual refresh).
     pub fn refresh(&mut self) -> Result<&Snapshot, AppError> {
+        self.diff_dirty = true;
+        self.load()
+    }
+
+    /// Select the stack target this process looks at. Requires a stack
+    /// review and a target the stack currently has; rebuilds the source,
+    /// swaps the watch signature, and re-lists (the generation bumps, so
+    /// every cached view reloads). Same mechanics as a `source` change.
+    pub fn select_target(&mut self, id: TargetId) -> Result<&Snapshot, AppError> {
+        let snapshot = self.loaded()?;
+        if !snapshot.is_stack() {
+            return Err(AppError::NotStackReview);
+        }
+        if snapshot.target(&id).is_none() {
+            return Err(AppError::UnknownTarget {
+                target: id.label().to_string(),
+            });
+        }
+        self.selected = Some(id);
         self.diff_dirty = true;
         self.load()
     }
@@ -491,26 +705,30 @@ impl Application {
     }
 
     /// Make sure the git source matches the review's current configuration
-    /// (verbs that never `load` still capture snippets against it).
-    fn ensure_source(&mut self) -> Result<(), AppError> {
-        if self.source_key.is_none() {
-            let outcome = self.store.load()?;
-            self.reconfigure(&outcome.review.source);
+    /// (verbs that never `load` still capture snippets against it), and
+    /// hand back that configuration.
+    fn ensure_source(&mut self) -> Result<Source, AppError> {
+        if let Some(snapshot) = &self.snapshot
+            && self.configured.is_some()
+        {
+            return Ok(snapshot.review.source.clone());
         }
-        Ok(())
+        let outcome = self.load_outcome()?;
+        self.reconfigure(&outcome.review.source);
+        Ok(outcome.review.source)
     }
 
-    /// The captured line for a new line comment: the origin path for the
-    /// old side of a rename, only the starting line (the documented snippet
-    /// semantics). An unsafe path rejects the comment; any other read
-    /// problem becomes a warning and the comment lands without a snippet.
-    fn capture_snippet(
+    /// The git source to capture a snippet against for `target`: the open
+    /// one when the target matches (or there is none), otherwise a second
+    /// source opened for that target, since agents comment on any PR of
+    /// the stack without a live view of it. A target that is not in the
+    /// stack yields `None` (the snippet is skipped with a warning, never a
+    /// rejection).
+    fn source_for(
         &self,
-        path: &str,
-        side: Side,
-        line: u32,
+        target: Option<&TargetId>,
         warnings: &mut Vec<String>,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Option<GitSource> {
         let Some(source) = &self.source else {
             warnings.push(format!(
                 "snippet not captured: {}",
@@ -518,6 +736,42 @@ impl Application {
                     .as_deref()
                     .unwrap_or("no diff source configured")
             ));
+            return None;
+        };
+        let Some(target) = target else {
+            return Some(source.clone());
+        };
+        if !source.spec().is_stack() || source.selected_target() == Some(target) {
+            return Some(source.clone());
+        }
+        let upstream = match &source.spec().mode {
+            SourceMode::Stack { upstream } => upstream.clone(),
+            _ => None,
+        };
+        let spec = CompareSpec::stack(upstream, Some(target.clone()));
+        match GitSource::open_with(self.store.root(), spec) {
+            Ok(other) => Some(other),
+            Err(e) => {
+                warnings.push(format!("snippet not captured: {e}"));
+                None
+            }
+        }
+    }
+
+    /// The captured line for a new line comment: the origin path for the
+    /// old side of a rename, only the starting line (the documented snippet
+    /// semantics), read against the COMMENT's target. An unsafe path
+    /// rejects the comment; any other read problem becomes a warning and
+    /// the comment lands without a snippet.
+    fn capture_snippet(
+        &self,
+        path: &str,
+        side: Side,
+        line: u32,
+        target: Option<&TargetId>,
+        warnings: &mut Vec<String>,
+    ) -> Result<Option<String>, AppError> {
+        let Some(source) = self.source_for(target, warnings) else {
             return Ok(None);
         };
         let side_path = match side {
@@ -540,30 +794,60 @@ impl Application {
         }
     }
 
+    /// Locked read-modify-write through the store, or, for an unsaved
+    /// review, creation of the file from the pending review with `f`
+    /// applied. The closure may run twice only in the narrow race where
+    /// another process creates the file first (then the ordinary locked
+    /// path runs it against that file).
+    fn mutate<T>(
+        &mut self,
+        mut f: impl FnMut(&mut ReviewFile) -> Result<T, ReviewError>,
+    ) -> Result<(T, Vec<String>), AppError> {
+        if let Some(pending) = &self.pending {
+            if !self.store.exists() {
+                let mut review = pending.clone();
+                let value = f(&mut review)?;
+                review.validate()?;
+                match self.store.init(&review) {
+                    Ok(()) => {
+                        self.pending = None;
+                        let warnings = exclude_review_from_git(self.store.root())
+                            .into_iter()
+                            .collect();
+                        return Ok((value, warnings));
+                    }
+                    Err(StoreError::AlreadyInitialized { .. }) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            self.pending = None;
+        }
+        Ok(self.store.mutate(f)?)
+    }
+
     /// Execute a review command under the store lock. Author resolution
     /// and validation happen outside the lock; snippet capture, id and
     /// time injection, and the domain operation inside it.
     pub fn execute(&mut self, cmd: ReviewCommand) -> Result<Outcome, AppError> {
-        self.ensure_source()?;
+        let source = self.ensure_source()?;
         let mut warnings = Vec::new();
         let (review, value, load_warnings) = match cmd {
             ReviewCommand::Add(req) => {
                 let author = resolve_author(req.author.clone());
-                let new = req.into_new_comment(author);
+                let mut new = req.into_new_comment(author);
                 validate_new_comment(&new)?;
-                let snippet = match (&new.path, new.line, new.side) {
+                validate_comment_target(&new, &source)?;
+                new.snippet = match (&new.path, new.line, new.side) {
                     (Some(path), Some(line), Some(side)) => {
-                        self.capture_snippet(path, side, line, &mut warnings)?
+                        self.capture_snippet(path, side, line, new.target.as_ref(), &mut warnings)?
                     }
                     _ => None,
                 };
-                let ((review, comment), load_warnings) = self.store.mutate(|review| {
-                    let mut new = new;
-                    new.snippet = snippet;
+                let ((review, comment), load_warnings) = self.mutate(|review| {
                     let ids: Vec<&str> = review.comments.iter().map(|c| c.id.as_str()).collect();
                     let id = generate_comment_id(&ids);
                     let now = now_rfc3339();
-                    let comment = review.try_add_comment(new, id, &now)?.clone();
+                    let comment = review.try_add_comment(new.clone(), id, &now)?.clone();
                     Ok((review.clone(), comment))
                 })?;
                 (
@@ -573,7 +857,7 @@ impl Application {
                 )
             }
             ReviewCommand::Edit(req) => {
-                let ((review, comment), load_warnings) = self.store.mutate(|review| {
+                let ((review, comment), load_warnings) = self.mutate(|review| {
                     let now = now_rfc3339();
                     let comment = review.edit_comment(&req.id, &req.body, &now)?.clone();
                     Ok((review.clone(), comment))
@@ -585,7 +869,7 @@ impl Application {
                 )
             }
             ReviewCommand::Delete(req) => {
-                let ((review, deleted), load_warnings) = self.store.mutate(|review| {
+                let ((review, deleted), load_warnings) = self.mutate(|review| {
                     let now = now_rfc3339();
                     let deleted = review.delete_comment(&req.id, &now)?;
                     Ok((review.clone(), deleted.id))
@@ -593,10 +877,10 @@ impl Application {
                 (review, OutcomeValue::Deleted(deleted), load_warnings)
             }
             ReviewCommand::Lifecycle { action, actor, req } => {
-                let ((review, comment), load_warnings) = self.store.mutate(|review| {
+                let ((review, comment), load_warnings) = self.mutate(|review| {
                     let now = now_rfc3339();
                     let comment = review
-                        .apply_lifecycle(&req.id, action, actor, req.response, &now)?
+                        .apply_lifecycle(&req.id, action, actor, req.response.clone(), &now)?
                         .clone();
                     Ok((review.clone(), comment))
                 })?;
@@ -607,7 +891,7 @@ impl Application {
                 )
             }
             ReviewCommand::ResolveAddressed { actor } => {
-                let ((review, ids), load_warnings) = self.store.mutate(|review| {
+                let ((review, ids), load_warnings) = self.mutate(|review| {
                     let now = now_rfc3339();
                     let ids = review.resolve_addressed(actor, &now)?;
                     Ok((review.clone(), ids))
@@ -615,7 +899,7 @@ impl Application {
                 (review, OutcomeValue::ResolvedAddressed(ids), load_warnings)
             }
             ReviewCommand::RevBump => {
-                let ((review, revision), load_warnings) = self.store.mutate(|review| {
+                let ((review, revision), load_warnings) = self.mutate(|review| {
                     let now = now_rfc3339();
                     let revision = review.try_rev_bump(&now)?;
                     Ok((review.clone(), revision))
@@ -724,6 +1008,9 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     cap!("ambidiff.review.editComment", server, stdio: "comment.edit", web: "comment.edit"),
     cap!("ambidiff.review.deleteComment", server, stdio: "comment.delete", web: "comment.delete"),
+    cap!("ambidiff.target.next", server, stdio: "target.select", web: "target.select"),
+    cap!("ambidiff.target.prev", server, stdio: "target.select", web: "target.select"),
+    cap!("ambidiff.target.pick", server, stdio: "target.select", web: "target.select"),
     cap!("ambidiff.search.start", client),
     cap!("ambidiff.search.next", client),
     cap!("ambidiff.search.prev", client),
@@ -813,5 +1100,12 @@ mod tests {
         assert_eq!(store.kind(), "store");
         assert_eq!(AppError::NotLoaded.kind(), "notLoaded");
         assert!(!AppError::NotLoaded.is_invalid_input());
+        assert_eq!(AppError::NotStackReview.kind(), "notStackReview");
+        assert!(AppError::NotStackReview.is_invalid_input());
+        let unknown = AppError::UnknownTarget {
+            target: "auth-9".into(),
+        };
+        assert_eq!(unknown.kind(), "unknownTarget");
+        assert!(unknown.is_invalid_input());
     }
 }

@@ -6,6 +6,7 @@
 import {
   type AnchoredComment,
   type CommandSpec,
+  type TargetId,
   type ExpansionResult,
   type FileEntry,
   type FileFilter,
@@ -40,6 +41,7 @@ export interface WasmExports {
   ad_version(): string;
   ad_set_review(content: string): string;
   ad_set_files(filesJson: string): string;
+  ad_set_targets(targetsJson: string): string;
   ad_load_file(path: string, rawDiff: string, optsJson: string): string;
   ad_load_placeholder(path: string, kindJson: string, optsJson: string): string;
   ad_projection(optsJson: string): string;
@@ -96,6 +98,9 @@ export interface AnchorTarget {
 export interface Core {
   setReview(content: string): ReviewSummary;
   setFiles(files: FileEntry[]): number;
+  /** Scope every later projection to the stack's live targets and the
+   * selected one (`[]` / `null` outside stack reviews). */
+  setTargets(scope: { targets: TargetId[]; selected: TargetId | null }): void;
   setViewOptions(mode: ViewMode, wordDiff: boolean, theme: ThemeWire): void;
   projection(filter: FileFilter, collapsed: readonly string[]): ProjectionSnapshot;
   loadFile(path: string, raw: string, opts: LoadOptions): FileView;
@@ -146,6 +151,9 @@ export function createCore(wasm: WasmExports): Core {
         generation: number;
       };
       return raw.generation;
+    },
+    setTargets(scope) {
+      parseJson(wasm.ad_set_targets(JSON.stringify(scope)), "setTargets");
     },
     setViewOptions(mode, wordDiff, theme) {
       parseJson(

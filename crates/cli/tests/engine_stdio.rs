@@ -58,6 +58,10 @@ struct EngineClient {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_id: u64,
+    /// Notifications that arrived while a response was awaited (the
+    /// notifier may announce a generation bump before the request thread
+    /// has written its reply); `expect_notification` drains these first.
+    notifications: Vec<serde_json::Value>,
 }
 
 impl EngineClient {
@@ -83,6 +87,7 @@ impl EngineClient {
             stdin,
             reader,
             next_id: 1,
+            notifications: Vec::new(),
         }
     }
 
@@ -106,6 +111,9 @@ impl EngineClient {
             let message = self.read_message();
             if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                 return message;
+            }
+            if message.get("method").is_some() {
+                self.notifications.push(message);
             }
         }
     }
@@ -145,6 +153,14 @@ impl EngineClient {
     fn expect_notification(&mut self, method: &str, timeout: Duration) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        if let Some(at) = self
+            .notifications
+            .iter()
+            .position(|m| m.get("method").and_then(serde_json::Value::as_str) == Some(method))
+        {
+            self.notifications.remove(at);
+            return;
+        }
         let deadline = Instant::now() + timeout;
         let pid = self.child.id();
         let done = Arc::new(AtomicBool::new(false));
@@ -704,4 +720,245 @@ fn addressing_with_an_empty_response_transitions_and_stores_none() {
     );
     assert_eq!(again["data"]["kind"], "review");
     client.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// Stack targets and unsaved reviews
+// ---------------------------------------------------------------------
+
+/// `main` (base), PR `auth-1` editing `src/a.ts`, PR `auth-2` adding
+/// `src/b.ts`, `auth-2` checked out; no review file yet.
+fn stack_repo_without_review() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(&root, "src/a.ts", "const a = 'BASE_ALPHA';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "auth-1"]);
+    write(&root, "src/a.ts", "const a = 'AUTH_ONE_BRAVO';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add bravo"]);
+    git(&root, &["checkout", "-q", "-b", "auth-2"]);
+    write(&root, "src/b.ts", "const b = 'AUTH_TWO_CHARLIE';\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add charlie"]);
+    (dir, root)
+}
+
+fn stack_repo() -> (tempfile::TempDir, PathBuf) {
+    let (dir, root) = stack_repo_without_review();
+    cli(&root, &["init", "--stack", "--upstream", "main", "--json"]);
+    (dir, root)
+}
+
+impl EngineClient {
+    /// Spawn with extra `engine` flags (`--commit`, `--stack`).
+    fn spawn_with_args(root: &Path, args: &[&str]) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+            .args(["engine", "--stdio"])
+            .args(args)
+            .current_dir(root)
+            .env("AMBIDIFF_AUTHOR", "engine-test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn engine");
+        let stdin = child.stdin.take().expect("stdin");
+        let reader = BufReader::new(child.stdout.take().expect("stdout"));
+        EngineClient {
+            child,
+            stdin,
+            reader,
+            next_id: 1,
+            notifications: Vec::new(),
+        }
+    }
+}
+
+fn paths_of(files: &serde_json::Value) -> Vec<String> {
+    files["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|f| f["path"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn initialize_carries_the_stack_and_target_select_switches_the_listing() {
+    let (_dir, root) = stack_repo();
+    let mut client = EngineClient::spawn(&root);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(keys(&init), keys(&fixture("stdio-initialize.json")));
+    assert!(
+        init["methods"]
+            .as_array()
+            .expect("methods")
+            .contains(&serde_json::json!("target.select"))
+    );
+    assert_eq!(
+        init["selected"],
+        serde_json::json!({"kind": "branch", "name": "auth-2"})
+    );
+    assert_eq!(init["commit"], serde_json::Value::Null);
+    let targets = init["targets"].as_array().expect("targets");
+    assert_eq!(targets.len(), 3);
+    assert_eq!(
+        keys(&targets[0]),
+        keys(&fixture("stdio-target-select.json")["targets"][0])
+    );
+    let files = client.request("files", serde_json::json!({}));
+    assert_eq!(keys(&files), keys(&fixture("stdio-files.json")));
+    assert_eq!(paths_of(&files), vec!["src/b.ts"]);
+    let generation = files["generation"].as_u64().expect("generation");
+
+    let selected = client.request(
+        "target.select",
+        serde_json::json!({"target": {"kind": "branch", "name": "auth-1"}}),
+    );
+    assert_eq!(keys(&selected), keys(&fixture("stdio-target-select.json")));
+    assert_eq!(selected["selected"]["name"], "auth-1");
+    assert!(selected["generation"].as_u64().expect("generation") > generation);
+    assert_eq!(
+        selected["comparison"]["new"]["oid"],
+        selected["targets"][0]["tip"]
+    );
+    // Exactly one diffChanged follows, and `files` reflects the new target.
+    client.expect_notification("diffChanged", Duration::from_secs(15));
+    let files = client.request("files", serde_json::json!({}));
+    assert_eq!(paths_of(&files), vec!["src/a.ts"]);
+    assert_eq!(files["selected"]["name"], "auth-1");
+    assert_eq!(files["generation"], selected["generation"]);
+
+    // A comment carrying the target lands with the PR's own snippet.
+    let added = client.request(
+        "comment.add",
+        serde_json::json!({
+            "path": "src/a.ts", "line": 1, "body": "bravo??",
+            "target": {"kind": "branch", "name": "auth-1"}
+        }),
+    );
+    assert_eq!(
+        added["target"],
+        serde_json::json!({"kind": "branch", "name": "auth-1"})
+    );
+    assert_eq!(added["snippet"], "const a = 'AUTH_ONE_BRAVO';");
+    let view = client.request("view", serde_json::json!({"path": "src/a.ts"}));
+    assert_eq!(view["comments"][0]["comment"]["id"], added["id"]);
+    let untargeted = client.expect_error(
+        "comment.add",
+        serde_json::json!({"path": "src/a.ts", "line": 1, "body": "no target"}),
+    );
+    assert_eq!(untargeted["code"], -32602);
+    assert_eq!(untargeted["data"]["kind"], "review");
+
+    let unknown = client.expect_error(
+        "target.select",
+        serde_json::json!({"target": {"kind": "branch", "name": "auth-9"}}),
+    );
+    assert_eq!(unknown["code"], -32602);
+    assert_eq!(unknown["data"]["kind"], "unknownTarget");
+    let malformed = client.expect_error("target.select", serde_json::json!({"target": "auth-1"}));
+    assert_eq!(malformed["data"]["kind"], "decode");
+    client.shutdown();
+}
+
+#[test]
+fn target_select_on_a_plain_review_is_invalid_input() {
+    let (_dir, root) = scratch_repo();
+    let mut client = EngineClient::spawn(&root);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(init["targets"], serde_json::json!([]));
+    assert_eq!(init["selected"], serde_json::Value::Null);
+    let err = client.expect_error(
+        "target.select",
+        serde_json::json!({"target": {"kind": "stack"}}),
+    );
+    assert_eq!(err["code"], -32602);
+    assert_eq!(err["data"]["kind"], "notStackReview");
+    client.shutdown();
+}
+
+#[test]
+fn an_unsaved_commit_review_creates_the_file_on_the_first_comment() {
+    let (_dir, root) = stack_repo_without_review();
+    let mut client = EngineClient::spawn_with_args(&root, &["--commit", "auth-1"]);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert!(
+        init["review"]["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("unsaved"))),
+        "{init}"
+    );
+    assert_eq!(init["commit"]["subject"], "add bravo");
+    assert_eq!(init["targets"], serde_json::json!([]));
+    assert_eq!(init["comparison"]["old"]["kind"], "commit");
+    assert_eq!(init["comparison"]["new"]["kind"], "commit");
+    assert!(!root.join(".ambidiff.json").exists());
+    let files = client.request("files", serde_json::json!({}));
+    assert_eq!(paths_of(&files), vec!["src/a.ts"]);
+
+    let added = client.request(
+        "comment.add",
+        serde_json::json!({"path": "src/a.ts", "line": 1, "body": "why bravo??"}),
+    );
+    assert_eq!(added["snippet"], "const a = 'AUTH_ONE_BRAVO';");
+    assert!(
+        root.join(".ambidiff.json").exists(),
+        "the first comment creates the file"
+    );
+    let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).expect("exclude");
+    assert!(exclude.contains(".ambidiff.json.guard"), "{exclude}");
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["status", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("status");
+    assert_eq!(out.status.code(), Some(10), "one open comment");
+    let review: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        review["source"],
+        serde_json::json!({"kind": "git", "commit": "auth-1"})
+    );
+    assert_eq!(review["todo"], 1);
+
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(
+        init["review"]["warnings"],
+        serde_json::json!([]),
+        "saved now"
+    );
+    client.expect_notification("reviewChanged", Duration::from_secs(15));
+    client.shutdown();
+}
+
+#[test]
+fn flags_that_disagree_with_the_review_file_fail_and_agreeing_flags_open() {
+    let (_dir, root) = scratch_repo();
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["engine", "--stdio", "--stack"])
+        .current_dir(&root)
+        .output()
+        .expect("engine");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("configured as git base HEAD"), "{stderr}");
+    assert!(stderr.contains("asked for git stack"), "{stderr}");
+
+    let (_dir2, stack) = stack_repo();
+    let mut client = EngineClient::spawn_with_args(&stack, &["--stack"]);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(init["selected"]["name"], "auth-2");
+    client.shutdown();
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["engine", "--stdio", "--stack", "--upstream", "other"])
+        .current_dir(&stack)
+        .output()
+        .expect("engine");
+    assert_eq!(out.status.code(), Some(1), "a different upstream disagrees");
 }

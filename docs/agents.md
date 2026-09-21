@@ -26,17 +26,24 @@ standing instruction, not on an agent noticing `.ambidiff.json` by itself.
 `ambidiff` field; this build writes 1.
 
 Top level: `review` (name), `revision` (current pass, starts at 1),
-`source` (`{kind: "git", base?: "<ref>", staged?: true}`), `createdAt`,
-`updatedAt`, `comments`, and `quarantined` (records that failed validation
-on a read, preserved verbatim). Unknown fields round-trip untouched.
+`source`, `createdAt`, `updatedAt`, `comments`, and `quarantined` (records
+that failed validation on a read, preserved verbatim). Unknown fields
+round-trip untouched.
 
-A plain `base` ref reviews the current branch from its merge base with
-that ref: the branch's own commits plus staged, unstaged and untracked
-local changes, never what landed on the ref since the fork. `staged`
-swaps the working tree for the index. `A..B` compares two commits and
-`A...B` compares B with its merge base with A (git's meanings; neither
-involves the working tree). No `base` means the working tree against the
-index.
+`source` selects the comparison. Exactly one selector is expected:
+
+| Shape | Meaning |
+| --- | --- |
+| `{kind: "git"}` | index against the working tree |
+| `{kind: "git", base: "<ref>"}` | the current branch from `merge-base(<ref>, HEAD)` against the working tree: its own commits plus staged, unstaged and untracked changes, never what landed on `<ref>` since the fork; `staged: true` swaps the working tree for the index |
+| `{kind: "git", base: "A..B"}` / `"A...B"` | two commits, with git's meanings: `A..B` is A against B, `A...B` is B against its merge base with A; neither involves the working tree |
+| `{kind: "git", commit: "<spec>"}` | one commit against its first parent (`ambidiff init --commit HEAD`) |
+| `{kind: "git", stack: {upstream?: "<ref>"}}` | a stack of PR branches above trunk (`ambidiff init --stack`); `upstream` overrides trunk auto-detection (`origin/HEAD`, then `origin/main`, `origin/master`, `main`, `master`) |
+
+When several selectors are present `stack` wins over `commit`, which wins
+over `base`, and every frontend shows a warning. A wrong-typed selector
+makes `source` unreadable and the file read-only rather than silently
+rewritten into another mode.
 
 Comment fields:
 
@@ -48,10 +55,41 @@ Comment fields:
 | `path` | file path, or null for a review-level comment |
 | `side` | `old` or `new`; removed lines anchor old-side numbers |
 | `line`, `endLine` | 1-based; `line` null means file-level |
-| `snippet` | source captured at comment time; drift detection compares it whitespace-insensitively |
+| `target` | stack reviews only: the target the comment was made against, `{kind: "branch", name}`, `{kind: "head"}`, `{kind: "stack"}`, or `{kind: "worktree"}`; absent outside stacks and on comments older than stacks |
+| `snippet` | source captured at comment time (against the comment's own `target` in a stack review); drift detection compares it whitespace-insensitively |
 | `body` | the comment; `??` marks a question |
 | `response` | the agent's one-liner, set when addressing |
 | `author`, `createdAt`, `updatedAt` | provenance |
+
+## Stacks
+
+A stack review (`source.stack`) has several **targets**: one per PR branch
+above trunk (bottom to top, `position` 1..n), `head` when commits sit above
+the topmost branch, `stack` (merge-base to `HEAD`) and `worktree` (`HEAD`
+against the working tree) when the tree is dirty. PR identity is the branch
+NAME: an amend, a `git rebase --update-refs`, or a bottom PR landing moves
+every tip oid but keeps the names, so comments stay on their PR. Oids are
+a cache for display, never a key.
+
+- Every path-anchored comment in a stack review MUST carry `target`;
+  `ambidiff comment add` requires `--target <branch|stack|worktree|head>`
+  (`branch:<name>` forces a branch named like a keyword). Review-level
+  comments may carry one or not. A target outside a stack review is
+  rejected.
+- Viewing one target hides the comments made on the other live targets. A
+  comment whose target left the stack (merged, deleted) joins the
+  unattached group with a "was on <name>" badge, visible from every target.
+- `ambidiff status --json` in a stack review adds `stack {trunk, base,
+  head, targets: [{id, label, position, tip, commitCount, subject,
+  aliases, comparison, counts: {todo, total}}]}`, `untargeted` and `wasOn`
+  tallies, and `stackError` (a discovery failure; the exit code still
+  follows the to-do count). `comment list --target <t>` filters by target.
+- To act on a to-do with `target: {kind: "branch", name}`: make the fix in
+  the commit at that branch (its current oid is `tip` in `status --json`)
+  and restack the branches above it with your stack tooling, then mark the
+  comment addressed as usual. Never resolve.
+- The selected target is per process (per TUI, per `ambidiff web` server
+  and all of its tabs, per engine); it is never written to the review file.
 
 ## Lifecycle
 
@@ -121,13 +159,18 @@ See `ambidiff --help` and the README for the full listing.
   `view`, `expand`, `commands`, `comment.add`, `comment.edit` (`{id, body}`),
   `comment.delete` (`{id}` -> `{deleted}`), `comment.address`,
   `comment.resolve`, `comment.reopen`, `comment.resolveAddressed` (no
-  payload), `rev.bump`, `shutdown`. `comment.resolve` and `rev.bump` are
+  payload), `rev.bump`, `target.select` (`{target}` -> `{selected, targets,
+  comparison, generation}`; `unknownTarget` / `notStackReview` are
+  `-32602`), `shutdown`. `comment.add` accepts `target`. `comment.resolve` and `rev.bump` are
   human only except one call an agent makes when a human explicitly
   directs it to in the moment; `comment.reopen` and
   `comment.resolveAddressed` are human only with no exception.
   `initialize` also reports `readOnlyReason`, `generation`, `sourceError`,
-  `comparison`, and `methods`; `files` adds `skipped`, `sourceError`,
-  `comparison`, `warnings`, `generation`; `expand` returns `rows` plus
+  `comparison`, `targets`, `selected`, `commit`, and `methods` (a client
+  feature-detects `target.select` there; the protocol version stays 1);
+  `files` adds `skipped`, `sourceError`, `comparison`, `targets`,
+  `selected`, `commit`, `warnings`, `generation`; a `target.select` is
+  followed by exactly one `diffChanged`; `expand` returns `rows` plus
   `at`, `gap`, `view`, `comments`, `generation` (a later `view` already
   contains every expansion). Invalid input (decoding, validation, unknown
   path or gap) is error code `-32602` with `error.data.kind`; other
@@ -141,11 +184,15 @@ See `ambidiff --help` and the README for the full listing.
   `comment.reopen` / `comment.resolveAddressed` / `rev.bump` (all human
   only; `comment.resolve` and `rev.bump` have one exception, an agent call
   made only when a human explicitly directs it to in the moment -
-  `comment.reopen` and `comment.resolveAddressed` have none). Errors are
-  `{type: "error", id, code,
-  message}`. Broadcasts `reviewChanged` and `diffChanged` carry the new
-  state and `generation`. Messages are limited to 1 MiB inbound and 16 MiB
-  outbound; at most 32 connections are served.
+  `comment.reopen` and `comment.resolveAddressed` have none), and
+  `target.select` (`{id, target}` -> a `targetSelected` acknowledgement
+  `{selected, targets, comparison, generation}` followed by a `diffChanged`
+  broadcast to every tab, the requester included; the selection is shared
+  by every tab of one server). Errors are `{type: "error", id, code,
+  message}`. `hello`, `snapshot`, and `diffChanged` carry `targets`,
+  `selected`, and `commit`. Broadcasts `reviewChanged` and `diffChanged`
+  carry the new state and `generation`. Messages are limited to 1 MiB
+  inbound and 16 MiB outbound; at most 32 connections are served.
 
 The exact shapes live in `fixtures/contracts/` and are asserted by the
 Rust and browser test suites.

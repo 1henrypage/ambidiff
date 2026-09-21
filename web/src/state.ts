@@ -12,16 +12,23 @@ import {
 } from "./core";
 import {
   type Comment,
+  type CommitSummary,
+  type FileCounts,
   type FileEntry,
   type FileFilter,
   type ProjectionSnapshot,
   type SearchMatch,
   type Side,
   type SkippedPath,
+  type Target,
+  type TargetId,
   type ThemeWire,
   type ViewMode,
   type ViewOptionsWire,
   DEFAULT_VIEW_OPTIONS,
+  sameTarget,
+  targetKey,
+  targetLabel,
 } from "./protocol";
 import { type CommentRecord, type DisplayLine, type Pane, buildDisplay, lineKey } from "./paint";
 import { type RequestBody, type TransportApi, TransportError } from "./transport";
@@ -71,8 +78,16 @@ function overviewPane(snapshot: ProjectionSnapshot | null): Pane {
     anchor: null,
     wasPath: null,
     unattached: o.unattached,
+    wasOn: o.wasOn,
   }));
   return { kind: "overview", comments };
+}
+
+/** The stack fields every snapshot-like message carries. */
+export interface StackFields {
+  targets: Target[];
+  selected: TargetId | null;
+  commit: CommitSummary | null;
 }
 
 export class Store {
@@ -80,6 +95,17 @@ export class Store {
   projection: ProjectionSnapshot | null = null;
   generation = 0;
   files: FileEntry[] = [];
+  /** The stack's targets in order (empty outside stack reviews). */
+  targets: Target[] = [];
+  /** The server process's selected target (shared by every tab). */
+  selected: TargetId | null = null;
+  /** The reviewed commit of a single-commit review. */
+  commit: CommitSummary | null = null;
+  /** The selection the current file listing was taken for. A
+   * `targetSelected` ack moves `selected` ahead of it; the `diffChanged`
+   * that follows is the listing catching up, and that is when the pane
+   * lands on the new target. */
+  private listedSelection: TargetId | null = null;
   nav: Nav = { kind: "overview" };
   navGen = 0;
   pane: Pane | null = null;
@@ -204,15 +230,17 @@ export class Store {
     }
   }
 
-  private applySnapshot(fields: {
-    review: string;
-    files: FileEntry[];
-    sourceError: string | null;
-    skipped: SkippedPath[];
-    warnings: string[];
-    readOnly: boolean;
-    readOnlyReason: string | null;
-  }): void {
+  private applySnapshot(
+    fields: {
+      review: string;
+      files: FileEntry[];
+      sourceError: string | null;
+      skipped: SkippedPath[];
+      warnings: string[];
+      readOnly: boolean;
+      readOnlyReason: string | null;
+    } & StackFields,
+  ): void {
     try {
       this.summary = this.core.setReview(fields.review);
       this.diagnostics.reviewError = null;
@@ -222,6 +250,9 @@ export class Store {
     }
     this.files = fields.files;
     this.generation = this.core.setFiles(fields.files);
+    const switched = this.booted && !sameTarget(this.listedSelection, fields.selected);
+    this.applyStack(fields);
+    this.listedSelection = fields.selected;
     this.diagnostics.sourceError = fields.sourceError;
     this.diagnostics.skipped = fields.skipped;
     this.diagnostics.warnings = fields.warnings;
@@ -229,10 +260,95 @@ export class Store {
     this.diagnostics.readOnlyReason = fields.readOnlyReason;
     this.reproject();
     this.reconcileNav();
+    if (switched) this.landAfterTargetSwitch();
+  }
+
+  /** Adopt the stack fields of a snapshot or diff broadcast and scope the
+   * core's projections to them (before the next `reproject`). */
+  private applyStack(fields: StackFields): void {
+    this.targets = fields.targets;
+    this.selected = fields.selected;
+    this.commit = fields.commit;
+    this.core.setTargets({ targets: this.targets.map((t) => t.id), selected: this.selected });
   }
 
   private reproject(): void {
     this.projection = this.core.projection(this.filter, [...this.collapsed]);
+  }
+
+  // ------------------------------------------------------------- targets
+
+  /** A stack review: there is a selection, or targets to select from. */
+  isStack(): boolean {
+    return this.selected !== null || this.targets.length > 0;
+  }
+
+  selectedTarget(): Target | null {
+    return this.targets.find((t) => sameTarget(t.id, this.selected)) ?? null;
+  }
+
+  selectedLabel(): string | null {
+    return this.selected ? targetLabel(this.selected) : null;
+  }
+
+  /** Index of the selected target in `targets`, or -1. */
+  targetIndex(): number {
+    return this.targets.findIndex((t) => sameTarget(t.id, this.selected));
+  }
+
+  /** The tally of comments made on `id` (own comments only). */
+  targetCounts(id: TargetId): FileCounts {
+    const key = targetKey(id);
+    return this.projection?.targetCounts.find((t) => targetKey(t.id) === key)?.counts ?? { todo: 0, total: 0 };
+  }
+
+  /**
+   * Select a stack target. The server acknowledges with `targetSelected`
+   * (adopted here) and publishes the new listing as a `diffChanged` to
+   * every tab, which is where the files arrive; nothing is fetched early.
+   */
+  selectTarget(id: TargetId): void {
+    if (sameTarget(id, this.selected)) return;
+    this.transport
+      .request({ type: "target.select", target: id })
+      .then((resp) => {
+        if (resp.type !== "targetSelected") return;
+        this.onTargetSelected(resp);
+      })
+      .catch((e: unknown) => {
+        this.flash = e instanceof Error ? e.message : String(e);
+        this.emit();
+      });
+  }
+
+  onTargetSelected(msg: { selected: TargetId | null; targets: Target[] }): void {
+    this.targets = msg.targets;
+    this.selected = msg.selected;
+    this.core.setTargets({ targets: this.targets.map((t) => t.id), selected: this.selected });
+    this.flash = `target: ${this.selectedLabel() ?? "-"}`;
+    this.emit();
+  }
+
+  /** `)` / `(`: step through the targets, flashing at either end. */
+  stepTarget(delta: number): void {
+    if (!this.isStack() || this.targets.length === 0) {
+      this.flash = "not a stack review";
+      this.emit();
+      return;
+    }
+    const next = Math.max(this.targetIndex(), 0) + delta;
+    if (next < 0) {
+      this.flash = "bottom of stack";
+      this.emit();
+      return;
+    }
+    const target = this.targets[next];
+    if (!target) {
+      this.flash = "top of stack";
+      this.emit();
+      return;
+    }
+    this.selectTarget(target.id);
   }
 
   /** Bring `nav`/`pane` back in line with the current file listing (B14). */
@@ -259,6 +375,16 @@ export class Store {
     }
     this.booted = true;
     this.installPane(overviewPane(this.projection), true);
+  }
+
+  /** After a target switch the open file is usually not in the new
+   * changed set: land on the new target's first file (as boot does)
+   * rather than on an overview that only says the old file vanished. */
+  private landAfterTargetSwitch(): void {
+    if (this.nav.kind === "overview" && this.files.length > 0) {
+      this.flash = null;
+      this.openFile(this.files[0]?.path ?? "", false);
+    }
   }
 
   // ------------------------------------------------------------ broadcasts
@@ -288,17 +414,23 @@ export class Store {
     this.emit();
   }
 
-  onDiffChanged(msg: {
-    files: FileEntry[];
-    skipped: SkippedPath[];
-    sourceError: string | null;
-  }): void {
+  onDiffChanged(
+    msg: {
+      files: FileEntry[];
+      skipped: SkippedPath[];
+      sourceError: string | null;
+    } & StackFields,
+  ): void {
     this.files = msg.files;
     this.generation = this.core.setFiles(msg.files);
+    const switched = !sameTarget(this.listedSelection, msg.selected);
+    this.applyStack(msg);
+    this.listedSelection = msg.selected;
     this.diagnostics.sourceError = msg.sourceError;
     this.diagnostics.skipped = msg.skipped;
     this.reproject();
     this.reconcileNav();
+    if (switched) this.landAfterTargetSwitch();
     this.emit();
   }
 
@@ -714,6 +846,9 @@ export class Store {
   ): Promise<Comment> {
     this.ensureWritable();
     if (body.trim() === "") throw new WriteBlocked("empty", "comment body is required");
+    // A comment made while looking at a stack target is tagged with it, so
+    // it hides from the other PRs of the stack.
+    const stackTarget = this.isStack() && this.selected ? this.selected : null;
     const req: RequestBody = {
       type: "comment.add",
       body,
@@ -721,6 +856,7 @@ export class Store {
       ...(target.side !== undefined ? { side: target.side } : {}),
       ...(target.line !== undefined ? { line: target.line } : {}),
       ...(target.endLine !== undefined ? { endLine: target.endLine } : {}),
+      ...(stackTarget !== null ? { target: stackTarget } : {}),
     };
     const resp = await this.transport.request(req);
     if (resp.type !== "comment") throw new Error(`unexpected response ${resp.type}`);

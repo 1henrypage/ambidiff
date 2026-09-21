@@ -19,12 +19,26 @@
   --warn: #9a6700; --search-bg: #ffe9a8; --status-bg: #e9edf3;
 }
 * { box-sizing: border-box; margin: 0; }
-html, body, #app { height: 100%; }
+html, body { height: 100%; }
 body {
   background: var(--bg); color: var(--fg);
   font: 13px/1.5 "SF Mono", ui-monospace, Menlo, monospace;
+  display: flex; flex-direction: column;
 }
-#app { display: flex; }
+/* The target strip (stack reviews only): one row across the top, the
+   selected target framed, the selected subject pushed to the right. */
+#strip {
+  background: var(--banner-bg); padding: 3px 12px; flex-shrink: 0;
+  display: flex; gap: 10px; white-space: nowrap; overflow: hidden;
+  border-bottom: 1px solid var(--card-border); user-select: none;
+}
+#strip[hidden] { display: none; }
+#strip .target { color: var(--dim); cursor: pointer; }
+#strip .target:hover { color: var(--fg); }
+#strip .target.selected { color: var(--fg); background: var(--cursor-bg); font-weight: 600; }
+#strip .subject { margin-left: auto; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+#strip .dim { color: var(--dim); }
+#app { display: flex; flex: 1; min-height: 0; }
 #tree {
   width: 300px; min-width: 220px; overflow-y: auto; flex-shrink: 0;
   border-right: 1px solid var(--card-border); padding: 6px 0;
@@ -131,6 +145,12 @@ body {
 #overlay td { padding: 1px 10px; }
 #overlay td.chord { color: var(--hunk); text-align: right; }
 #overlay td.desc { color: var(--dim); }
+#overlay .box:focus { outline: none; }
+#overlay .picker-row { padding: 2px 8px; cursor: pointer; white-space: pre; }
+#overlay .picker-row:hover { background: var(--cursor-bg); }
+#overlay .picker-row.cursor { background: var(--cursor-bg); outline: 1px solid var(--hunk); outline-offset: -1px; }
+#overlay .picker-row .desc { color: var(--dim); }
+#banner .commit { color: var(--hunk); }
 button {
   background: var(--cursor-bg); color: var(--fg); border: 1px solid var(--card-border);
   border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer; margin-right: 6px;

@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use crate::model::{FileDiff, FileDiffKind, FileEntry, FileStatus};
 use crate::parser::parse_file_diff;
-use crate::review::Side;
+use crate::review::{REVIEW_FILE_NAME, Side, is_review_sidecar};
 use crate::rootio::{self, ReviewRoot, RootError};
 use crate::source::{
     CommitSummary, CompareSpec, Comparison, DiffSource, Endpoint, FileDiffRequest, Listing,
@@ -1150,6 +1150,35 @@ fn commit_subject(
 // Stack discovery
 // ---------------------------------------------------------------------
 
+/// Whether a `status --porcelain -z` listing reports anything besides
+/// ambidiff's own review file and sidecars: those live in the tree but are
+/// never review content, so an unexcluded `.ambidiff.json` (or a lock
+/// sidecar mid-write) must not conjure a `worktree` target. Records are
+/// `XY path` NUL-terminated; renames and copies carry a second NUL field.
+fn status_is_dirty(status: &[u8]) -> bool {
+    let fields = split_nul(status);
+    let mut i = 0;
+    while i < fields.len() {
+        let record = fields[i];
+        i += 1;
+        if record.len() < 3 {
+            continue;
+        }
+        let (code, path) = record.split_at(3);
+        if matches!(code[0], b'R' | b'C') || matches!(code[1], b'R' | b'C') {
+            // Skip the origin path of a rename/copy.
+            i += 1;
+        }
+        let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        let own =
+            std::str::from_utf8(name).is_ok_and(|n| n == REVIEW_FILE_NAME || is_review_sidecar(n));
+        if !own {
+            return true;
+        }
+    }
+    false
+}
+
 /// Trunk candidates in order when `--upstream` is not given: the remote's
 /// default branch, then the conventional names on the remote, then locally.
 const TRUNK_CANDIDATES: [&str; 4] = [
@@ -1273,14 +1302,19 @@ fn discover(
         .ok()
         .and_then(|out| out.trim().strip_prefix("refs/heads/").map(str::to_string));
 
-    let status = run_capture_ok(
-        git,
-        root,
-        &["status", "--porcelain", "-z", "--untracked-files=normal"],
-        deadline,
-        None,
-    )?;
-    let dirty = !status.is_empty();
+    let mut status = Vec::new();
+    let status_args = ["status", "--porcelain", "-z", "--untracked-files=normal"];
+    let result = run_git(git, root, &status_args, deadline, None, &mut |chunk| {
+        status.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    if !result.status_ok {
+        return Err(SourceError::GitFailed {
+            args: status_args.join(" "),
+            stderr: String::from_utf8_lossy(&result.stderr).trim().to_string(),
+        });
+    }
+    let dirty = status_is_dirty(&status);
 
     Ok(assemble_stack(StackInput {
         trunk,
@@ -2287,6 +2321,26 @@ mod tests {
                 new: Endpoint::Commit { oid: "b".into() }
             }),
             vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn status_dirtiness_ignores_the_review_file_and_its_sidecars() {
+        assert!(!status_is_dirty(b""));
+        assert!(!status_is_dirty(b"?? .ambidiff.json\0"));
+        assert!(!status_is_dirty(
+            b"?? .ambidiff.json\0?? .ambidiff.json.guard\0?? sub/.ambidiff.json.lock\0?? .ambidiff.json.tmp.abc\0"
+        ));
+        assert!(status_is_dirty(b"?? .ambidiff.json\0?? notes.txt\0"));
+        assert!(status_is_dirty(b" M src/a.rs\0"));
+        assert!(status_is_dirty(b"R  new.rs\0old.rs\0"));
+        assert!(
+            !status_is_dirty(b"R  .ambidiff.json\0old.json\0"),
+            "origin field skipped"
+        );
+        assert!(
+            status_is_dirty(b"?? .ambidiff.jsonx\0"),
+            "a look-alike name is real dirt"
         );
     }
 
