@@ -336,6 +336,28 @@ impl WatchController {
         *self.shared.last_diff_error.lock().expect("diff error lock") = err;
     }
 
+    /// Whether the OS watch is registered: `None` while the background
+    /// thread has not reported yet (only possible when `start_checked`'s
+    /// bounded wait expired first), `Some(true)` armed, `Some(false)`
+    /// degraded to polling. Waits up to `timeout` for the report.
+    pub fn wait_armed(&self, timeout: Duration) -> Option<bool> {
+        let mut armed = self.shared.armed.lock().expect("armed lock");
+        let deadline = Instant::now() + timeout;
+        while armed.is_none() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (guard, _timeout) = self
+                .shared
+                .armed_cv
+                .wait_timeout(armed, deadline - now)
+                .expect("armed condvar wait");
+            armed = guard;
+        }
+        *armed
+    }
+
     /// The most recent diff-signature failure, if the latest evaluation
     /// failed; `None` once it succeeds again.
     pub fn last_diff_error(&self) -> Option<String> {

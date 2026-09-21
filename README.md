@@ -52,8 +52,9 @@ them together). `ambidiff --stack` shows a strip across the top with every
 target: the PRs bottom to top, `head` when commits sit above the topmost
 branch, `stack` for the whole thing, and `worktree` when the tree is
 dirty. `)` and `(` move up and down the stack, `p` opens a picker, a click
-on the strip selects, and the browser gets the same strip (neovim `]t` /
-`[t`, `:Ambidiff targets`). Reviewing PR 2 diffs `tip(PR1)..tip(PR2)`.
+on the strip selects, and the browser gets the same strip (the neovim
+plugin's `]t` / `[t` follow in its next release). Reviewing PR 2 diffs
+`tip(PR1)..tip(PR2)`.
 
 Every comment made on a PR is tagged with it (`"target": {"kind":
 "branch", "name": "auth-2"}`), so PR 1's comments never show up misplaced
