@@ -770,12 +770,37 @@ impl DiffSource for GitSource {
 }
 
 impl GitSource {
-    /// Change signature: an FNV-1a hash fed streamed content, never an
-    /// unbounded buffered patch. Independently re-resolves the comparison
-    /// (see the module docs) so a moved `HEAD` is detected even though the
-    /// open session's cached comparison stays put. The watch controller
-    /// re-runs this after filesystem events and refreshes only when it
-    /// moves (the gate against touch-without-change noise).
+    /// The spec's live resolution, without touching the pinned one: what
+    /// `open_with` would pin right now. `try_signature` feeds it, and the
+    /// application compares it with [`GitSource::comparison`] on a dirty
+    /// load to decide whether to re-open (a rebase moved the merge base; a
+    /// commit review of `HEAD` moved on).
+    pub fn resolve_current(&self) -> Result<Comparison, SourceError> {
+        Ok(resolve_spec(&self.root, &self.git, &self.spec, self.limits.git_deadline)?.comparison)
+    }
+
+    /// Change signature: an FNV-1a hash over the comparison, the changed
+    /// entries, and the working-tree content of the changed paths, bounded
+    /// by the number of changed entries plus `untracked_bytes` per file. It
+    /// never touches patch text, so a branch review on a large repository
+    /// costs the same as a small one. Independently re-resolves the
+    /// comparison (see the module docs) so a moved `HEAD` or merge base is
+    /// detected even though the open session's pinned comparison stays
+    /// put. The watch controller re-runs this after filesystem events and
+    /// refreshes only when it moves (the gate against touch-without-change
+    /// noise).
+    ///
+    /// What is fed, by the new endpoint: a commit (or the empty tree)
+    /// nothing beyond the comparison, both oids pin the diff; the index a
+    /// `git diff --raw --cached` listing (real oids on both sides); the
+    /// working tree each raw record's identity (modes, old oid, status,
+    /// paths) followed by that path's working-tree content, then the
+    /// untracked listing and its content. The new-side oid of a
+    /// working-tree record is deliberately left out: git prints a real oid
+    /// while the file is stat-clean against the index and all zeros once
+    /// it is rewritten with the very same bytes, and neither is a change.
+    /// Content-derived throughout, never mtime-derived: a touch that
+    /// leaves content alone holds the signature.
     pub fn try_signature(&self) -> Result<u64, SourceError> {
         let resolved = resolve_spec(&self.root, &self.git, &self.spec, self.limits.git_deadline)?;
         let comparison = resolved.comparison;
@@ -789,63 +814,91 @@ impl GitSource {
         hasher.feed(b"cmp\0");
         hasher.feed(comparison.to_string().as_bytes());
 
-        let mut args = self.diff_prefix_args();
-        args.extend(endpoint_args(&comparison));
-        args.push("--".into());
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let result = run_git(
-            &self.git,
-            &self.root,
-            &arg_refs,
-            self.limits.git_deadline,
-            None,
-            &mut |chunk| {
-                hasher.feed(chunk);
-                Ok(())
-            },
-        )?;
-        if !result.status_ok {
-            return Err(SourceError::GitFailed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&result.stderr).trim().to_string(),
-            });
-        }
-
-        if comparison.new_is_worktree() {
-            let mut listing_bytes = Vec::new();
-            let out_args = ["ls-files", "--others", "--exclude-standard", "-z"];
-            run_git(
-                &self.git,
-                &self.root,
-                &out_args,
-                self.limits.git_deadline,
-                None,
-                &mut |chunk| {
-                    listing_bytes.extend_from_slice(chunk);
-                    Ok(())
-                },
-            )?;
-            hasher.feed(&listing_bytes);
-
-            let root = self.root_reader()?;
-            for path_bytes in split_nul(&listing_bytes) {
-                let Ok(path) = std::str::from_utf8(path_bytes) else {
-                    continue;
-                };
-                hasher.feed(path.as_bytes());
-                match root.size(path) {
-                    Ok(Some(size)) if size <= self.limits.untracked_bytes => {
-                        let _ = root.read_with(path, self.limits.untracked_bytes, &mut |chunk| {
-                            hasher.feed(chunk);
-                            Ok(())
-                        });
+        match comparison.new {
+            Endpoint::Commit { .. } | Endpoint::EmptyTree { .. } => {}
+            Endpoint::Index => {
+                let raw = self.raw_listing(&comparison)?;
+                hasher.feed(b"raw\0");
+                for record in parse_raw_z(&raw) {
+                    record.feed_identity(&mut hasher);
+                    hasher.feed(record.new_oid);
+                    hasher.feed(b"\0");
+                }
+            }
+            Endpoint::Worktree => {
+                let raw = self.raw_listing(&comparison)?;
+                let root = self.root_reader()?;
+                hasher.feed(b"raw\0");
+                for record in parse_raw_z(&raw) {
+                    record.feed_identity(&mut hasher);
+                    // A non-UTF-8 path's identity is hashed (so its
+                    // appearance, rename, or removal moves the signature);
+                    // only its content goes unread, as the listing skips it.
+                    match std::str::from_utf8(record.path) {
+                        Ok(path) => self.feed_worktree_file(&root, path, &mut hasher),
+                        Err(_) => hasher.feed(b"nonutf8\0"),
                     }
-                    Ok(Some(size)) => hasher.feed(format!("toolarge:{size}").as_bytes()),
-                    _ => {}
+                }
+
+                let untracked = self.run_ok_bytes(&[
+                    "ls-files".into(),
+                    "--others".into(),
+                    "--exclude-standard".into(),
+                    "-z".into(),
+                ])?;
+                hasher.feed(b"untracked\0");
+                hasher.feed(&untracked);
+                for path_bytes in split_nul(&untracked) {
+                    let Ok(path) = std::str::from_utf8(path_bytes) else {
+                        continue;
+                    };
+                    self.feed_worktree_file(&root, path, &mut hasher);
                 }
             }
         }
         Ok(hasher.finish())
+    }
+
+    /// `git diff --raw -z --no-abbrev` for `cmp`: one record per changed
+    /// entry (modes, oids, status, paths) and no patch text, buffered under
+    /// `raw_bytes` like every other listing. `--no-abbrev` rather than
+    /// `--abbrev=40`: the latter truncates SHA-256 oids and can lengthen
+    /// as the object count grows.
+    fn raw_listing(&self, cmp: &Comparison) -> Result<Vec<u8>, SourceError> {
+        let mut args = self.diff_prefix_args();
+        args.extend(endpoint_args(cmp));
+        args.extend([
+            "--raw".into(),
+            "-z".into(),
+            "--no-abbrev".into(),
+            "--".into(),
+        ]);
+        self.run_ok_bytes(&args)
+    }
+
+    /// Feed one working-tree file's content into the signature, or a
+    /// marker for why it was not read: `toolarge:<size>` past
+    /// `untracked_bytes` (such a file renders as too large anyway),
+    /// `missing` when it is gone (a deletion), `unreadable` for anything
+    /// else. Never the mtime.
+    fn feed_worktree_file(&self, root: &ReviewRoot, path: &str, hasher: &mut Fnv1a) {
+        hasher.feed(b"wt\0");
+        hasher.feed(path.as_bytes());
+        hasher.feed(b"\0");
+        match root.size(path) {
+            Ok(Some(size)) if size <= self.limits.untracked_bytes => {
+                let read = root.read_with(path, self.limits.untracked_bytes, &mut |chunk| {
+                    hasher.feed(chunk);
+                    Ok(())
+                });
+                if read.is_err() {
+                    hasher.feed(b"unreadable\0");
+                }
+            }
+            Ok(Some(size)) => hasher.feed(format!("toolarge:{size}\0").as_bytes()),
+            Ok(None) => hasher.feed(b"missing\0"),
+            Err(_) => hasher.feed(b"unreadable\0"),
+        }
     }
 
     /// Add the review file and its sidecars to `.git/info/exclude` so review
@@ -1850,6 +1903,93 @@ fn parse_numstat_bytes(bytes: &[u8]) -> BTreeMap<String, (Option<u64>, Option<u6
     map
 }
 
+/// One `git diff --raw -z --no-abbrev` record: `:<old_mode> <new_mode>
+/// <old_oid> <new_oid> <status>\0<path>\0`, a rename or copy (`R<score>`,
+/// `C<score>`) carrying the origin path before the current one. Paths are
+/// kept as bytes: the signature hashes them verbatim and only reads
+/// content for the UTF-8 ones. A working-tree entry that differs from the
+/// index (or a deletion) has no blob on the new side, and git prints an
+/// all-zero `new_oid` there, 40 or 64 hex digits wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawRecord<'a> {
+    old_mode: &'a [u8],
+    new_mode: &'a [u8],
+    old_oid: &'a [u8],
+    new_oid: &'a [u8],
+    status: &'a [u8],
+    old_path: Option<&'a [u8]>,
+    path: &'a [u8],
+}
+
+impl RawRecord<'_> {
+    /// Everything that identifies the record except the new-side oid (an
+    /// index record's is fed by the caller; a working-tree record's is
+    /// replaced by the file's content, see `try_signature`), each field
+    /// NUL-terminated so adjacent records cannot alias.
+    fn feed_identity(&self, hasher: &mut Fnv1a) {
+        for field in [
+            self.old_mode,
+            self.new_mode,
+            self.old_oid,
+            self.status,
+            self.old_path.unwrap_or(b""),
+            self.path,
+        ] {
+            hasher.feed(field);
+            hasher.feed(b"\0");
+        }
+    }
+}
+
+/// Parse NUL-separated `git diff --raw -z` output. Tolerant, never panics:
+/// a malformed meta field is skipped, and a record cut off before its
+/// path(s) is dropped.
+fn parse_raw_z(bytes: &[u8]) -> Vec<RawRecord<'_>> {
+    let fields = split_nul(bytes);
+    let mut records = Vec::new();
+    let mut i = 0;
+    while i < fields.len() {
+        let meta = fields[i];
+        i += 1;
+        let Some(meta) = meta.strip_prefix(b":") else {
+            continue;
+        };
+        let mut parts = meta.split(|&b| b == b' ').filter(|p| !p.is_empty());
+        let (Some(old_mode), Some(new_mode), Some(old_oid), Some(new_oid), Some(status)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        let Some(&first_path) = fields.get(i) else {
+            break;
+        };
+        i += 1;
+        let (old_path, path) = if matches!(status.first(), Some(b'R' | b'C')) {
+            let Some(&current) = fields.get(i) else {
+                break;
+            };
+            i += 1;
+            (Some(first_path), current)
+        } else {
+            (None, first_path)
+        };
+        records.push(RawRecord {
+            old_mode,
+            new_mode,
+            old_oid,
+            new_oid,
+            status,
+            old_path,
+            path,
+        });
+    }
+    records
+}
+
 /// Pull the `field_index`-th whitespace-separated token before the first tab
 /// of each `-z` record (`<mode> <oid> <stage>\t<path>` for `ls-files
 /// --stage`, `<mode> <type> <oid>\t<path>` for `ls-tree`), returning the
@@ -1946,6 +2086,156 @@ mod tests {
         assert_eq!(map["src/a.rs"], (Some(10), Some(2)));
         assert_eq!(map["img.png"], (None, None));
         assert_eq!(map["new.rs"], (Some(5), Some(1)));
+    }
+
+    const ZERO40: &[u8] = b"0000000000000000000000000000000000000000";
+    const OID_A: &[u8] = b"78981922613b2afb6025042ff6bd878ac1994e85";
+    const OID_B: &[u8] = b"3e757656cf36eca53338e520d134963a44f793f8";
+
+    fn raw(meta: &[&[u8]], paths: &[&[u8]]) -> Vec<u8> {
+        let mut out = vec![b':'];
+        out.extend_from_slice(&meta.join(&b' '));
+        out.push(0);
+        for p in paths {
+            out.extend_from_slice(p);
+            out.push(0);
+        }
+        out
+    }
+
+    #[test]
+    fn parse_raw_z_plain_modify_add_and_delete() {
+        let mut bytes = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[b"f.txt"]);
+        bytes.extend(raw(
+            &[b"000000", b"100644", ZERO40, OID_B, b"A"],
+            &[b"g.txt"],
+        ));
+        bytes.extend(raw(
+            &[b"100644", b"000000", OID_B, ZERO40, b"D"],
+            &[b"h.txt"],
+        ));
+        let records = parse_raw_z(&bytes);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].status, b"M");
+        assert_eq!(records[0].path, b"f.txt");
+        assert_eq!(records[0].old_path, None);
+        assert_eq!(records[0].old_oid, OID_A);
+        assert_eq!(records[0].new_oid, ZERO40, "a dirty worktree file");
+        assert_eq!(records[1].status, b"A");
+        assert_eq!(records[1].new_oid, OID_B, "an added file gets a real oid");
+        assert_eq!(records[2].status, b"D");
+        assert_eq!(records[2].new_oid, ZERO40);
+    }
+
+    #[test]
+    fn raw_record_identity_leaves_out_the_new_oid() {
+        let clean = raw(&[b"100644", b"100644", OID_A, OID_B, b"M"], &[b"f.txt"]);
+        let dirty = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[b"f.txt"]);
+        let feed = |bytes: &[u8]| {
+            let mut h = Fnv1a::new();
+            for r in parse_raw_z(bytes) {
+                r.feed_identity(&mut h);
+            }
+            h.finish()
+        };
+        assert_eq!(
+            feed(&clean),
+            feed(&dirty),
+            "stat-clean and stat-dirty agree"
+        );
+        let moved = raw(
+            &[b"100644", b"100644", OID_A, ZERO40, b"R100"],
+            &[b"f.txt", b"g.txt"],
+        );
+        assert_ne!(feed(&clean), feed(&moved));
+        let mode = raw(&[b"100644", b"100755", OID_A, ZERO40, b"M"], &[b"f.txt"]);
+        assert_ne!(feed(&clean), feed(&mode));
+        let other_old = raw(&[b"100644", b"100644", OID_B, ZERO40, b"M"], &[b"f.txt"]);
+        assert_ne!(feed(&clean), feed(&other_old));
+    }
+
+    #[test]
+    fn parse_raw_z_rename_consumes_origin_then_current_path() {
+        let mut bytes = raw(
+            &[b"100644", b"100644", OID_A, OID_B, b"R084"],
+            &[b"big.txt", b"moved.txt"],
+        );
+        bytes.extend(raw(
+            &[b"100644", b"100644", OID_A, ZERO40, b"M"],
+            &[b"after.txt"],
+        ));
+        let records = parse_raw_z(&bytes);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].status, b"R084");
+        assert_eq!(records[0].old_path, Some(&b"big.txt"[..]));
+        assert_eq!(records[0].path, b"moved.txt");
+        assert_eq!(
+            records[1].path, b"after.txt",
+            "the record after a rename is aligned"
+        );
+        let copy = raw(
+            &[b"100644", b"100644", OID_A, OID_B, b"C100"],
+            &[b"a", b"b"],
+        );
+        assert_eq!(parse_raw_z(&copy)[0].old_path, Some(&b"a"[..]));
+    }
+
+    #[test]
+    fn parse_raw_z_mode_change_keeps_both_modes() {
+        let bytes = raw(&[b"100644", b"100755", OID_A, OID_A, b"M"], &[b"tool.sh"]);
+        let records = parse_raw_z(&bytes);
+        assert_eq!(records[0].old_mode, b"100644");
+        assert_eq!(records[0].new_mode, b"100755");
+        assert_eq!(records[0].old_oid, records[0].new_oid);
+    }
+
+    #[test]
+    fn parse_raw_z_keeps_oids_of_either_object_format_width() {
+        let wide = [b'a'; 64];
+        let zero64 = [b'0'; 64];
+        let bytes = raw(&[b"100644", b"100644", &wide, &zero64, b"M"], &[b"f"]);
+        let records = parse_raw_z(&bytes);
+        assert_eq!(records[0].old_oid, &wide[..], "SHA-256 width");
+        assert_eq!(records[0].new_oid, &zero64[..]);
+        let bytes = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[b"f"]);
+        assert_eq!(parse_raw_z(&bytes)[0].old_oid, OID_A, "SHA-1 width");
+    }
+
+    #[test]
+    fn parse_raw_z_non_utf8_path_is_kept_as_bytes() {
+        let bad = [b'b', b'a', b'd', 0xFF, b'.', b't', b'x', b't'];
+        let bytes = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[&bad]);
+        let records = parse_raw_z(&bytes);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, &bad[..]);
+        assert!(std::str::from_utf8(records[0].path).is_err());
+    }
+
+    #[test]
+    fn parse_raw_z_tolerates_a_truncated_tail() {
+        assert!(parse_raw_z(b"").is_empty());
+        let mut bytes = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[b"kept.txt"]);
+        bytes.extend_from_slice(b":100644 100644 ");
+        bytes.extend_from_slice(OID_A);
+        bytes.push(b' ');
+        bytes.extend_from_slice(OID_B);
+        bytes.extend_from_slice(b" R090\0only-origin\0");
+        let records = parse_raw_z(&bytes);
+        assert_eq!(
+            records.len(),
+            1,
+            "a rename cut off before its current path is dropped"
+        );
+        assert_eq!(records[0].path, b"kept.txt");
+        let meta_only = b":100644 100644 abc\0".to_vec();
+        assert!(parse_raw_z(&meta_only).is_empty(), "too few meta fields");
+        let no_path = raw(&[b"100644", b"100644", OID_A, ZERO40, b"M"], &[]);
+        assert!(
+            parse_raw_z(&no_path).is_empty(),
+            "a record without its path"
+        );
+        let junk = b"not-a-record\0path\0".to_vec();
+        assert!(parse_raw_z(&junk).is_empty());
     }
 
     #[test]

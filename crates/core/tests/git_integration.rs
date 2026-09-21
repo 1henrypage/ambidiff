@@ -1152,6 +1152,146 @@ fn plain_base_on_an_unborn_head_is_an_explicit_error() {
     );
 }
 
+#[test]
+fn signature_moves_when_the_merge_base_moves_and_holds_when_the_base_merely_advances() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let pinned = source.comparison().clone();
+    let sig_at_fork = source.try_signature().expect("signature");
+
+    write(&s.root, "upstream_3.txt", "u3\n");
+    git(&s.root, &["add", "-A"]);
+    git(&s.root, &["commit", "-qm", "U3"]);
+    assert_eq!(
+        source.try_signature().expect("signature"),
+        sig_at_fork,
+        "main advancing does not move the fork point"
+    );
+    assert_eq!(source.resolve_current().expect("resolve"), pinned);
+
+    git(&s.wt, &["rebase", "-q", "main"]);
+    let live = source.resolve_current().expect("resolve after rebase");
+    assert_ne!(live, pinned, "the merge base moved to main's tip");
+    assert_eq!(
+        live.old,
+        Endpoint::Commit {
+            oid: oid_of(&s.root, "main")
+        }
+    );
+    assert_eq!(
+        *source.comparison(),
+        pinned,
+        "the handle's pin is untouched"
+    );
+    assert_ne!(
+        source.try_signature().expect("signature"),
+        sig_at_fork,
+        "a moved merge base moves the signature"
+    );
+}
+
+#[test]
+fn signature_moves_when_a_new_file_is_staged() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    write(&s.wt, "new.txt", "new\n");
+    let sig_untracked = source.try_signature().expect("signature");
+    assert_ne!(sig_untracked, sig1, "an untracked file counts");
+    git(&s.wt, &["add", "new.txt"]);
+    let sig_staged = source.try_signature().expect("signature");
+    assert_ne!(sig_staged, sig1);
+    assert_ne!(
+        sig_staged, sig_untracked,
+        "staging changes the listing (added with a real oid, no longer untracked)"
+    );
+}
+
+#[test]
+fn signature_moves_on_a_mode_change_without_a_content_change() {
+    let (_dir, root) = repo(&[("tool.sh", "#!/bin/sh\necho hi\n")]);
+    git(&root, &["config", "core.fileMode", "true"]);
+    let source = GitSource::open(&root, Some("HEAD".into()), false).expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(root.join("tool.sh"))
+        .expect("meta")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(root.join("tool.sh"), perms).expect("chmod");
+    assert_ne!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "a mode-only change is a change"
+    );
+}
+
+#[test]
+fn signature_moves_on_a_staged_rename() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    git(&s.wt, &["mv", "shared.txt", "moved.txt"]);
+    assert_ne!(source.try_signature().expect("signature"), sig1);
+    let entries = source.listing().expect("listing").entries;
+    let moved = entry_for(&entries, "moved.txt");
+    assert_eq!(moved.status, FileStatus::Renamed);
+    assert_eq!(moved.old_path.as_deref(), Some("shared.txt"));
+}
+
+#[test]
+fn signature_returns_to_the_clean_value_when_an_edit_is_reverted() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), false).expect("open");
+    let clean = source.try_signature().expect("signature");
+    write(&s.wt, "feature.txt", "feature v3\n");
+    let dirty = source.try_signature().expect("signature");
+    assert_ne!(dirty, clean);
+    write(&s.wt, "feature.txt", "feature v2\n");
+    assert_eq!(
+        source.try_signature().expect("signature"),
+        clean,
+        "content-derived: the same content is the same signature"
+    );
+}
+
+#[test]
+fn commit_range_signature_ignores_worktree_and_untracked_changes() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main...feature".into()), false).expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    write(&s.wt, "feature.txt", "feature v3\n");
+    write(&s.wt, "loose.txt", "loose\n");
+    git(&s.wt, &["add", "loose.txt"]);
+    assert_eq!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "two commits pin the diff; the tree and the index are not part of it"
+    );
+    git(&s.wt, &["commit", "-qam", "F2"]);
+    assert_ne!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "a new commit on the right side moves it"
+    );
+}
+
+#[test]
+fn staged_signature_ignores_unstaged_edits_until_they_are_added() {
+    let s = branch_scenario();
+    let source = GitSource::open(&s.wt, Some("main".into()), true).expect("open");
+    let sig1 = source.try_signature().expect("signature");
+    write(&s.wt, "feature.txt", "feature v3\n");
+    write(&s.wt, "loose.txt", "loose\n");
+    assert_eq!(
+        source.try_signature().expect("signature"),
+        sig1,
+        "the index is the new side: an unstaged edit and an untracked file are invisible"
+    );
+    git(&s.wt, &["add", "feature.txt"]);
+    assert_ne!(source.try_signature().expect("signature"), sig1);
+}
+
 // ---------------------------------------------------------------------
 // Commit mode and stacks
 // ---------------------------------------------------------------------
