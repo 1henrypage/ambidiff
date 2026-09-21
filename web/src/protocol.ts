@@ -730,6 +730,7 @@ export type ClientRequest =
   | { type: "comment.address"; id: number; commentId: string; response?: string }
   | { type: "comment.resolve"; id: number; commentId: string }
   | { type: "comment.reopen"; id: number; commentId: string }
+  | { type: "comment.resolveAddressed"; id: number }
   | { type: "rev.bump"; id: number };
 
 export const CLIENT_MESSAGE_TYPES = [
@@ -743,6 +744,7 @@ export const CLIENT_MESSAGE_TYPES = [
   "comment.address",
   "comment.resolve",
   "comment.reopen",
+  "comment.resolveAddressed",
   "rev.bump",
 ] as const;
 
@@ -806,6 +808,12 @@ export interface RevisionMessage {
   revision: number;
   warnings: string[];
 }
+export interface ResolvedAddressedMessage {
+  type: "resolvedAddressed";
+  id: number;
+  commentIds: string[];
+  warnings: string[];
+}
 export interface ErrorMessage {
   type: "error";
   id: number | null;
@@ -837,6 +845,7 @@ export type ServerMessage =
   | CommentMessage
   | DeletedMessage
   | RevisionMessage
+  | ResolvedAddressedMessage
   | ErrorMessage
   | ReviewChangedMessage
   | DiffChangedMessage;
@@ -852,6 +861,7 @@ export const SERVER_MESSAGE_TYPES = [
   "comment",
   "deleted",
   "revision",
+  "resolvedAddressed",
   "error",
   "reviewChanged",
   "diffChanged",
@@ -928,6 +938,13 @@ export function decodeServerMessage(v: unknown): ServerMessage {
         type,
         id: int(o, "id"),
         revision: int(o, "revision"),
+        warnings: arr(o, "warnings", strings),
+      };
+    case "resolvedAddressed":
+      return {
+        type,
+        id: int(o, "id"),
+        commentIds: arr(o, "commentIds", strings),
         warnings: arr(o, "warnings", strings),
       };
     case "error":

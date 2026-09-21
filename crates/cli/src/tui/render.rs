@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use super::app::{App, DRow, FileTarget, Focus, Overlay};
+use super::app::{App, ConfirmAction, DRow, FileTarget, Focus, Overlay};
 use super::theme::Theme;
 use super::wrap;
 
@@ -230,7 +230,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.overlay() {
         Overlay::Help => draw_help(frame, app, area),
         Overlay::Editor(_) => draw_editor(frame, app, area),
-        Overlay::ConfirmDelete { id } => draw_confirm(frame, app, area, &id.clone()),
+        Overlay::Confirm(action) => draw_confirm(frame, app, area, &action.clone()),
         Overlay::None => {
             if let Some(search) = app.search()
                 && search.typing
@@ -1059,7 +1059,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let popup = centered(area, 74, area.height.saturating_sub(4).min(38));
+    let popup = centered(area, 74, area.height.saturating_sub(4).min(44));
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(" ambidiff help ")
@@ -1154,23 +1154,32 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     ));
 }
 
-fn draw_confirm(frame: &mut Frame, app: &App, area: Rect, id: &str) {
+fn draw_confirm(frame: &mut Frame, app: &App, area: Rect, action: &ConfirmAction) {
     let theme = app.theme();
+    let (title, body, hint) = match action {
+        ConfirmAction::DeleteComment { id } => (
+            " delete comment ".to_string(),
+            format!("delete {} permanently?", clean(id)),
+            "y confirms \u{b7} esc cancels (prefer resolve)".to_string(),
+        ),
+        ConfirmAction::ResolveAddressed { count } => (
+            " resolve addressed ".to_string(),
+            format!("resolve {count} addressed comments?"),
+            "y confirms \u{b7} esc cancels".to_string(),
+        ),
+    };
     let popup = centered(area, 50, 5);
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .title(" delete comment ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.remove_sign))
         .style(Style::default().bg(theme.overlay_bg).fg(theme.fg));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let lines = vec![
-        Line::from(format!("delete {} permanently?", clean(id))),
-        Line::from(Span::styled(
-            "y confirms \u{b7} esc cancels (prefer resolve)",
-            Style::default().fg(theme.dim),
-        )),
+        Line::from(body),
+        Line::from(Span::styled(hint, Style::default().fg(theme.dim))),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }

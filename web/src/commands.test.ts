@@ -90,3 +90,51 @@ describe("counted dispatch", () => {
     expect(calls.gotoLine).toEqual([]);
   });
 });
+
+describe("delete comment", () => {
+  function spyDeleteStore(status: "open" | "resolved") {
+    const calls = { deleteComment: [] as string[], setFlash: [] as string[] };
+    const store = {
+      cursorComment: () => ({ comment: { id: "c-1", status } }),
+      deleteNeedsConfirm: (s: string) => s !== "resolved",
+      deleteComment: (id: string) => {
+        calls.deleteComment.push(id);
+        return Promise.resolve();
+      },
+      setFlash: (msg: string) => calls.setFlash.push(msg),
+    } as unknown as Store;
+    return { store, calls };
+  }
+
+  function spyEditor() {
+    const confirms: { title: string; onConfirm: () => void }[] = [];
+    const editor = {
+      confirm: (title: string, onConfirm: () => void) => confirms.push({ title, onConfirm }),
+    } as unknown as Editor;
+    return { editor, confirms };
+  }
+
+  test("a_resolved_comment_deletes_without_confirming", async () => {
+    const { store, calls } = spyDeleteStore("resolved");
+    const { editor, confirms } = spyEditor();
+    const dispatcher = createDispatcher(store, editor, () => {});
+    dispatcher.run("ambidiff.review.deleteComment");
+    expect(confirms).toEqual([]);
+    expect(calls.deleteComment).toEqual(["c-1"]);
+    await Promise.resolve();
+    expect(calls.setFlash).toEqual(["comment deleted"]);
+  });
+
+  test("an_open_comment_waits_for_confirmation", async () => {
+    const { store, calls } = spyDeleteStore("open");
+    const { editor, confirms } = spyEditor();
+    const dispatcher = createDispatcher(store, editor, () => {});
+    dispatcher.run("ambidiff.review.deleteComment");
+    expect(confirms.length).toBe(1);
+    expect(calls.deleteComment).toEqual([]);
+    confirms[0]?.onConfirm();
+    expect(calls.deleteComment).toEqual(["c-1"]);
+    await Promise.resolve();
+    expect(calls.setFlash).toEqual(["comment deleted"]);
+  });
+});

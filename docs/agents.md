@@ -58,12 +58,16 @@ open ----addressed----> addressed --resolved--> resolved
   response.
 - Resolve: HUMAN ONLY; from open, addressed, or reopened.
 - Reopen: HUMAN ONLY; from addressed or resolved.
+- Resolve addressed: HUMAN ONLY; bulk-resolves every `addressed` comment in
+  one action (TUI `X`, neovim `gX`, browser `X`); open and reopened
+  comments are untouched.
 - The agent to-do list is exactly {open, reopened}.
 
 Illegal transitions fail with typed errors at the CLI and every frontend.
-The CLI cannot verify who is human, so the resolve/reopen restriction is a
-contract: the agent instructions forbid those verbs, and the interactive
-frontends are the human path.
+The CLI cannot verify who is human, so the resolve/reopen/resolve-addressed
+restriction is a contract: the agent instructions forbid those verbs, and
+the interactive frontends are the human path. There is no CLI verb for
+resolve addressed - it is a UI-only action.
 
 ## Revisions
 
@@ -100,7 +104,8 @@ See `ambidiff --help` and the README for the full listing.
   `reviewChanged` / `diffChanged`. Methods: `initialize`, `review`, `files`,
   `view`, `expand`, `commands`, `comment.add`, `comment.edit` (`{id, body}`),
   `comment.delete` (`{id}` -> `{deleted}`), `comment.address`,
-  `comment.resolve`, `comment.reopen`, `rev.bump`, `shutdown`.
+  `comment.resolve`, `comment.reopen`, `comment.resolveAddressed` (no
+  payload; human only, agents must not call it), `rev.bump`, `shutdown`.
   `initialize` also reports `readOnlyReason`, `generation`, `sourceError`,
   `comparison`, and `methods`; `files` adds `skipped`, `sourceError`,
   `comparison`, `warnings`, `generation`; `expand` returns `rows` plus
@@ -114,7 +119,8 @@ See `ambidiff --help` and the README for the full listing.
   that its reply echoes. Requests: `refresh` (-> a full `snapshot`),
   `getFile`, `getSrc` (listed paths only), `comment.add`, `comment.edit` and
   `comment.delete` (`commentId`), `comment.address` / `comment.resolve` /
-  `comment.reopen`, `rev.bump`. Errors are `{type: "error", id, code,
+  `comment.reopen` / `comment.resolveAddressed` (human only, agents must not
+  call it), `rev.bump`. Errors are `{type: "error", id, code,
   message}`. Broadcasts `reviewChanged` and `diffChanged` carry the new
   state and `generation`. Messages are limited to 1 MiB inbound and 16 MiB
   outbound; at most 32 connections are served.

@@ -181,6 +181,19 @@ export function createDispatcher(store: Store, editor: Editor, render: () => voi
       },
     ],
     [
+      "ambidiff.review.resolveAddressed",
+      () => {
+        const count = store.addressedCount();
+        if (count === 0) {
+          store.setFlash("no addressed comments to resolve");
+          return;
+        }
+        editor.confirm(`resolve ${count} addressed comments?`, () =>
+          reportWrite(store, store.resolveAddressed()),
+        );
+      },
+    ],
+    [
       "ambidiff.review.editComment",
       () => {
         const record = store.cursorComment();
@@ -205,9 +218,16 @@ export function createDispatcher(store: Store, editor: Editor, render: () => voi
           store.setFlash("cursor is not on a comment");
           return;
         }
-        editor.confirm(`delete comment ${record.comment.id}?`, () =>
-          reportWrite(store, store.deleteComment(record.comment.id)),
-        );
+        const del = () =>
+          reportWrite(
+            store,
+            store.deleteComment(record.comment.id).then(() => store.setFlash("comment deleted")),
+          );
+        if (store.deleteNeedsConfirm(record.comment.status)) {
+          editor.confirm(`delete comment ${record.comment.id}?`, del);
+        } else {
+          del();
+        }
       },
     ],
 

@@ -15,6 +15,7 @@ import {
   type ProjectionSnapshot,
   type SearchMatch,
   type ThemeWire,
+  type Status,
   type ViewMode,
   type ViewOptionsWire,
   decodeAnchoredComment,
@@ -50,6 +51,7 @@ export interface WasmExports {
   ad_goto_line(path: string, line: number): string;
   ad_anchor_target(path: string, row: number, cell: string): string;
   ad_commands(): string;
+  ad_delete_needs_confirm(statusJson: string): string;
 }
 
 export interface ReviewCounts {
@@ -105,6 +107,7 @@ export interface Core {
   gotoLine(path: string, line: number): LineTarget;
   anchorTarget(path: string, row: number, cell: "auto" | "left" | "right"): AnchorTarget | null;
   commands(): CommandSpec[];
+  deleteNeedsConfirm(status: Status): boolean;
 }
 
 function parseJson(json: string, what: string): unknown {
@@ -211,6 +214,10 @@ export function createCore(wasm: WasmExports): Core {
     commands() {
       const raw = parseJson(wasm.ad_commands(), "commands");
       return decodeCommandTable(raw);
+    },
+    deleteNeedsConfirm(status) {
+      const raw = parseJson(wasm.ad_delete_needs_confirm(JSON.stringify(status)), "deleteNeedsConfirm");
+      return raw === true;
     },
   };
 }

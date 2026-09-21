@@ -266,6 +266,56 @@ describe("writes", () => {
     const req2 = transport.find("comment.address");
     expect(req2 && (req2.msg as { response?: string }).response).toBe("restored the guard");
   });
+
+  test("resolveAddressed_sends_the_right_request_and_returns_the_ids", async () => {
+    const { store, transport } = await bootedOn("a.ts");
+    const promise = store.resolveAddressed();
+    const req = transport.find("comment.resolveAddressed");
+    expect(req).toBeDefined();
+    expect(req?.msg).toEqual({ type: "comment.resolveAddressed" });
+    transport.answer("comment.resolveAddressed", undefined, {
+      type: "resolvedAddressed",
+      id: 0,
+      commentIds: ["c-1", "c-2"],
+      warnings: [],
+    });
+    await expect(promise).resolves.toEqual(["c-1", "c-2"]);
+  });
+
+  test("resolveAddressed_is_blocked_when_disconnected_or_read_only", async () => {
+    const { store } = harness([]);
+    await expect(store.resolveAddressed()).rejects.toBeInstanceOf(WriteBlocked);
+
+    const { store: store2 } = await bootedOn("a.ts");
+    store2.diagnostics.readOnly = true;
+    await expect(store2.resolveAddressed()).rejects.toBeInstanceOf(WriteBlocked);
+  });
+});
+
+describe("addressed count", () => {
+  test("addressedCount_reads_the_review_summary", async () => {
+    const { store, core } = await bootedOn("a.ts");
+    expect(store.addressedCount()).toBe(0);
+    core.summary = { ...core.summary, counts: { ...core.summary.counts, addressed: 3 } };
+    store.onReviewChanged({ review: "r", warnings: [], readOnly: false, readOnlyReason: null });
+    expect(store.addressedCount()).toBe(3);
+  });
+});
+
+describe("delete confirmation", () => {
+  test("delegates_to_core_for_each_status", () => {
+    const { store } = harness([]);
+    expect(store.deleteNeedsConfirm("open")).toBe(true);
+    expect(store.deleteNeedsConfirm("addressed")).toBe(true);
+    expect(store.deleteNeedsConfirm("reopened")).toBe(true);
+    expect(store.deleteNeedsConfirm("resolved")).toBe(false);
+  });
+
+  test("fails_safe_toward_asking_when_core_throws", () => {
+    const { store, core } = harness([]);
+    core.deleteNeedsConfirmThrows = true;
+    expect(store.deleteNeedsConfirm("resolved")).toBe(true);
+  });
 });
 
 describe("cursor", () => {

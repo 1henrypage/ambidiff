@@ -1,10 +1,11 @@
 // The five B17 commands plus tree keyboard navigation and help: Tab moves
 // focus to the tree with a visible ring and j/k/Enter drive it, W toggles
 // wrap, L hides the gutters, e edits a comment through the draft flow, D
-// confirms then deletes, and ? opens help listing the web chords.
+// confirms then deletes (or deletes at once for an already-resolved
+// comment), and ? opens help listing the web chords.
 import { test, expect } from "@playwright/test";
 
-import { ScratchRepo, startServer, type Server } from "./helpers";
+import { ScratchRepo, readReview, startServer, type Server } from "./helpers";
 
 let repo: ScratchRepo;
 let server: Server;
@@ -81,6 +82,79 @@ test("e edits a comment through the draft flow; D confirms then deletes it", asy
   await expect(page.locator("#overlay")).toBeVisible();
   await page.locator('#overlay [data-act="confirm"]').click();
   await expect(page.locator("#rows")).not.toContainText("now edited", { timeout: 15_000 });
+});
+
+test("D deletes a resolved comment at once, without the confirm dialog", async ({ page }) => {
+  // The earlier test already deleted "will edit"/"now edited", so seeding
+  // this comment here (rather than in beforeAll) keeps it the only one on
+  // the page and leaves the earlier test's single-comment "." assumption
+  // undisturbed.
+  repo.cli(["comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "already resolved"]);
+  await page.goto(url);
+  await expect(page.locator("#rows")).toContainText("already resolved", { timeout: 20_000 });
+
+  await page.locator("#viewport").click();
+  await page.keyboard.press(".");
+  await expect(page.locator(".dl.cursor")).toHaveClass(/card/);
+
+  await page.keyboard.press("x"); // resolve
+  await expect(page.locator(".dl.cursor")).toContainText("resolved");
+
+  await page.keyboard.press("D");
+  await expect(page.locator("#overlay")).not.toBeVisible();
+  await expect(page.locator("#rows")).not.toContainText("already resolved", { timeout: 15_000 });
+});
+
+test("X resolves every addressed comment at once, leaving open ones alone", async ({ page }) => {
+  const addressedId = (
+    JSON.parse(
+      repo.cli(["comment", "add", "-p", "src/a.ts", "-l", "1", "-m", "addressed one", "--json"]),
+    ) as { id: string }
+  ).id;
+  const openId = (
+    JSON.parse(repo.cli(["comment", "add", "-p", "src/a.ts", "-m", "stays open", "--json"])) as {
+      id: string;
+    }
+  ).id;
+  repo.cli(["comment", "addressed", addressedId, "-m", "done", "--json"]);
+
+  await page.goto(url);
+  await expect(page.locator("#rows")).toContainText("addressed one", { timeout: 20_000 });
+
+  await page.locator("#viewport").click();
+  await page.keyboard.press("X");
+  await expect(page.locator("#overlay")).toContainText("resolve 1 addressed comments?");
+  await page.locator('#overlay [data-act="confirm"]').click();
+  await expect(page.locator("#overlay")).toBeHidden();
+
+  await expect(page.locator(".dl.chead", { hasText: addressedId })).toContainText("resolved", {
+    timeout: 15_000,
+  });
+  await expect(page.locator(".dl.chead", { hasText: openId })).toContainText("open");
+
+  await expect
+    .poll(
+      () =>
+        (readReview(repo.root).comments as { id: string; status: string }[]).find(
+          (c) => c.id === addressedId,
+        )?.status,
+      { timeout: 15_000 },
+    )
+    .toBe("resolved");
+  expect(
+    (readReview(repo.root).comments as { id: string; status: string }[]).find((c) => c.id === openId)
+      ?.status,
+  ).toBe("open");
+});
+
+test("X with nothing addressed flashes instead of confirming", async ({ page }) => {
+  await page.goto(url);
+  await expect(page.locator("#rows")).toContainText("export const a", { timeout: 20_000 });
+
+  await page.locator("#viewport").click();
+  await page.keyboard.press("X");
+  await expect(page.locator("#statusbar .msg")).toContainText("no addressed comments to resolve");
+  await expect(page.locator("#overlay")).toBeHidden();
 });
 
 test("? opens help listing the web chords", async ({ page }) => {

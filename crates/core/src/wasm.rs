@@ -22,7 +22,7 @@ use crate::anchor::ActiveCell;
 use crate::model::{FileDiff, FileDiffKind, FileEntry, FileStatus};
 use crate::parser::parse_file_diff;
 use crate::projection::{FileFilter, ReviewProjection};
-use crate::review::{ReviewFile, Source, parse_review};
+use crate::review::{ReviewFile, Source, Status, parse_review};
 use crate::view::ViewOptions;
 use crate::view_state::ViewState;
 
@@ -461,6 +461,17 @@ pub fn ad_commands() -> String {
     ok_json(&crate::commands::COMMANDS)
 }
 
+/// Whether deleting a comment in `status_json` should ask the human first
+/// (`crate::lifecycle::Status::delete_needs_confirm`), so the browser never
+/// re-spells the rule in TypeScript.
+#[wasm_bindgen]
+pub fn ad_delete_needs_confirm(status_json: &str) -> String {
+    match serde_json::from_str::<Status>(status_json) {
+        Ok(status) => ok_json(&status.delete_needs_confirm()),
+        Err(e) => err_json(e),
+    }
+}
+
 /// Wasm-side checks of the exports end to end: these only run under the
 /// wasm32 target (`scripts/test-wasm.sh`), which is the point, since the
 /// browser painter calls exactly these entry points.
@@ -635,5 +646,15 @@ mod wasm_tests {
             ad_goto_line("nope.rs", 1),
             err_json("\"nope.rs\" not loaded")
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn delete_needs_confirm_matches_lifecycle_for_every_status() {
+        assert_eq!(v(ad_delete_needs_confirm("\"open\"")), true);
+        assert_eq!(v(ad_delete_needs_confirm("\"addressed\"")), true);
+        assert_eq!(v(ad_delete_needs_confirm("\"reopened\"")), true);
+        assert_eq!(v(ad_delete_needs_confirm("\"resolved\"")), false);
+        let err = ad_delete_needs_confirm("\"bogus\"");
+        assert!(err.contains("error"), "{err}");
     }
 }

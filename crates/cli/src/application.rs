@@ -88,6 +88,9 @@ pub enum ReviewCommand {
         actor: Actor,
         req: LifecycleRequest,
     },
+    ResolveAddressed {
+        actor: Actor,
+    },
     RevBump,
 }
 
@@ -97,6 +100,7 @@ pub enum OutcomeValue {
     /// variants.
     Comment(Box<Comment>),
     Deleted(String),
+    ResolvedAddressed(Vec<String>),
     Revision(u32),
 }
 
@@ -602,6 +606,14 @@ impl Application {
                     load_warnings,
                 )
             }
+            ReviewCommand::ResolveAddressed { actor } => {
+                let ((review, ids), load_warnings) = self.store.mutate(|review| {
+                    let now = now_rfc3339();
+                    let ids = review.resolve_addressed(actor, &now)?;
+                    Ok((review.clone(), ids))
+                })?;
+                (review, OutcomeValue::ResolvedAddressed(ids), load_warnings)
+            }
             ReviewCommand::RevBump => {
                 let ((review, revision), load_warnings) = self.store.mutate(|review| {
                     let now = now_rfc3339();
@@ -704,6 +716,12 @@ pub const CAPABILITIES: &[Capability] = &[
     cap!("ambidiff.review.address", server, stdio: "comment.address", web: "comment.address"),
     cap!("ambidiff.review.resolve", server, stdio: "comment.resolve", web: "comment.resolve"),
     cap!("ambidiff.review.reopen", server, stdio: "comment.reopen", web: "comment.reopen"),
+    cap!(
+        "ambidiff.review.resolveAddressed",
+        server,
+        stdio: "comment.resolveAddressed",
+        web: "comment.resolveAddressed"
+    ),
     cap!("ambidiff.review.editComment", server, stdio: "comment.edit", web: "comment.edit"),
     cap!("ambidiff.review.deleteComment", server, stdio: "comment.delete", web: "comment.delete"),
     cap!("ambidiff.search.start", client),

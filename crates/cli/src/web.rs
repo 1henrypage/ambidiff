@@ -62,6 +62,7 @@ pub const MESSAGE_TYPES: &[&str] = &[
     "comment.address",
     "comment.resolve",
     "comment.reopen",
+    "comment.resolveAddressed",
     "rev.bump",
 ];
 
@@ -809,6 +810,12 @@ fn handle_client_message(state: &ServerState, text: &str) -> Value {
         "comment.address" => lifecycle(state, &request, Action::Address, Actor::Agent),
         "comment.resolve" => lifecycle(state, &request, Action::Resolve, Actor::Human),
         "comment.reopen" => lifecycle(state, &request, Action::Reopen, Actor::Human),
+        "comment.resolveAddressed" => execute(
+            state,
+            ReviewCommand::ResolveAddressed {
+                actor: Actor::Human,
+            },
+        ),
         "rev.bump" => execute(state, ReviewCommand::RevBump),
         // `auth` is only valid as the first message.
         other => {
@@ -893,6 +900,9 @@ fn execute(state: &ServerState, cmd: ReviewCommand) -> Result<Value, AppError> {
         }
         OutcomeValue::Deleted(id) => {
             json!({"type": "deleted", "commentId": id, "warnings": outcome.warnings})
+        }
+        OutcomeValue::ResolvedAddressed(ids) => {
+            json!({"type": "resolvedAddressed", "commentIds": ids, "warnings": outcome.warnings})
         }
         OutcomeValue::Revision(revision) => {
             json!({"type": "revision", "revision": revision, "warnings": outcome.warnings})

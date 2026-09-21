@@ -267,6 +267,47 @@ fn handshake_view_comment_lifecycle_round_trip() {
 }
 
 #[test]
+fn comment_resolve_addressed_round_trip() {
+    let (_dir, root) = scratch_repo();
+    let mut client = EngineClient::spawn(&root);
+    client.request("initialize", serde_json::json!({}));
+
+    let a = client.request(
+        "comment.add",
+        serde_json::json!({"path": "lib.py", "line": 2, "body": "a??"}),
+    );
+    let id_a = a["id"].as_str().expect("id").to_string();
+    let b = client.request(
+        "comment.add",
+        serde_json::json!({"path": "lib.py", "line": 4, "body": "b??"}),
+    );
+    let id_b = b["id"].as_str().expect("id").to_string();
+
+    client.request(
+        "comment.address",
+        serde_json::json!({"id": id_a, "response": "fixed"}),
+    );
+    client.request(
+        "comment.address",
+        serde_json::json!({"id": id_b, "response": "fixed too"}),
+    );
+
+    let result = client.request("comment.resolveAddressed", serde_json::json!({}));
+    let ids = result["resolvedAddressed"]
+        .as_array()
+        .expect("resolvedAddressed array");
+    let ids: Vec<&str> = ids.iter().map(|v| v.as_str().expect("id string")).collect();
+    assert_eq!(ids, vec![id_a.as_str(), id_b.as_str()]);
+
+    let review = client.request("review", serde_json::json!({}));
+    let comments = review["review"]["comments"].as_array().expect("comments");
+    assert!(comments.iter().all(|c| c["status"] == "resolved"));
+    assert_eq!(review["review"]["revision"], 1, "revision does not move");
+
+    client.shutdown();
+}
+
+#[test]
 fn external_review_write_produces_notification() {
     let (_dir, root) = scratch_repo();
     let mut client = EngineClient::spawn(&root);

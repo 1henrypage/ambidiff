@@ -20,6 +20,7 @@ import type {
   OverviewCommentOwned,
   ProjectionSnapshot,
   SearchMatch,
+  Status,
   ThemeWire,
   ViewMode,
 } from "../protocol";
@@ -87,6 +88,8 @@ export class FakeCore implements Core {
   /** Set to make the next `gotoLine` call return this instead of "nearest none". */
   gotoResult: LineTarget | null = null;
   lastGoto: { path: string; line: number } | null = null;
+  /** Set to make `deleteNeedsConfirm` throw, exercising the fail-safe path. */
+  deleteNeedsConfirmThrows = false;
 
   setReview(content: string): ReviewSummary {
     this.setReviewCalls.push(content);
@@ -189,5 +192,10 @@ export class FakeCore implements Core {
 
   commands(): CommandSpec[] {
     return this.commandTable;
+  }
+
+  deleteNeedsConfirm(status: Status): boolean {
+    if (this.deleteNeedsConfirmThrows) throw new CoreError("deleteNeedsConfirm failed");
+    return status !== "resolved";
   }
 }

@@ -325,6 +325,78 @@ fn open_navigate_comment_quit_persists() {
     assert_eq!(comments[0]["snippet"], "const two = 2;");
 }
 
+/// `D` on a live comment still confirms; `D` on a resolved one deletes at
+/// once. This is the rigorous form of "no dialog appeared": if a
+/// confirmation had been required for the second `D`, one keypress alone
+/// could not have deleted anything, so the review file is the assertion
+/// throughout -- including for the resolve step, since ratatui's
+/// cell-diffed repaints can skip rewriting a cell whose column position
+/// happens to keep the same byte across frames, splitting a short status
+/// word across escape sequences in the raw PTY stream (`tui_pty.rs:521`).
+#[test]
+fn delete_skips_confirmation_once_resolved() {
+    let (_dir, root) = scratch_repo();
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "src/app.ts", "initial render");
+
+    send(&mut session, "jjj"); // land on the removed line (old side)
+    send(&mut session, "c");
+    wait_for(&mut session, "comment on src/app.ts", "editor overlay");
+    send(&mut session, "still live");
+    send(&mut session, "\x13"); // ctrl-s saves
+    wait_for(&mut session, "still live", "comment card rendered");
+
+    send(&mut session, "."); // jump onto the comment card
+    send(&mut session, "D");
+    wait_for(
+        &mut session,
+        "delete comment",
+        "confirm dialog appears for an open comment",
+    );
+    send(&mut session, "n"); // cancel
+
+    let content = std::fs::read_to_string(root.join(".ambidiff.json")).expect("review file");
+    let value: serde_json::Value = serde_json::from_str(&content).expect("json");
+    assert_eq!(
+        value["comments"].as_array().expect("comments").len(),
+        1,
+        "cancelling the dialog must not delete the comment"
+    );
+
+    send(&mut session, "x"); // resolve
+    retry_until(
+        || {
+            let Ok(content) = std::fs::read_to_string(root.join(".ambidiff.json")) else {
+                return false;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                return false;
+            };
+            value["comments"][0]["status"] == "resolved"
+        },
+        Duration::from_secs(10),
+    );
+
+    send(&mut session, "D"); // a single D: no dialog for a resolved comment
+    retry_until(
+        || {
+            let Ok(content) = std::fs::read_to_string(root.join(".ambidiff.json")) else {
+                return false;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                return false;
+            };
+            value["comments"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        },
+        Duration::from_secs(10),
+    );
+
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
 /// A watch-driven diff reload must keep the cursor on the same logical
 /// line. Observable: the comment editor's title names the cursor line, so
 /// opening it before and after the reload must show the same target.
@@ -786,6 +858,132 @@ fn source_change_reconfigures_listing() {
         "SECOND_MARKER_TWO",
         "source change reconfigures the comparison",
     );
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+/// Add a review-level comment via the real CLI, returning its id.
+fn cli_add_comment(root: &Path, body: &str) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["comment", "add", "-m", body, "--json"])
+        .current_dir(root)
+        .output()
+        .expect("cli comment add");
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    value["id"].as_str().expect("id").to_string()
+}
+
+/// Address a comment via the real CLI.
+fn cli_address_comment(root: &Path, id: &str, response: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["comment", "addressed", id, "-m", response, "--json"])
+        .current_dir(root)
+        .output()
+        .expect("cli comment addressed");
+    assert!(out.status.success());
+}
+
+fn review_comment_status(root: &Path, id: &str) -> Option<String> {
+    let content = std::fs::read_to_string(root.join(".ambidiff.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value["comments"]
+        .as_array()?
+        .iter()
+        .find(|c| c["id"] == id)?["status"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `X` resolves every addressed comment in one action, leaving untouched
+/// comments alone: the first PTY test to drive the confirm overlay at all.
+#[test]
+fn resolve_addressed_confirms_and_flips_only_addressed_comments() {
+    let (_dir, root) = scratch_repo();
+    let addressed_id = cli_add_comment(&root, "fix the jump to 2000");
+    let open_id = cli_add_comment(&root, "still need to look at this");
+    cli_address_comment(&root, &addressed_id, "done, see the fix");
+
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "src/app.ts", "initial render");
+
+    send(&mut session, "X");
+    wait_for(
+        &mut session,
+        "resolve 1 addressed comments?",
+        "confirm dialog shows the addressed count",
+    );
+    send(&mut session, "y");
+    wait_for_all(
+        &mut session,
+        &["resolved 1 addressed comments"],
+        "flash confirms the batch resolve",
+    );
+
+    retry_until(
+        || review_comment_status(&root, &addressed_id).as_deref() == Some("resolved"),
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        review_comment_status(&root, &open_id).as_deref(),
+        Some("open"),
+        "untouched comment stays open"
+    );
+    let content = std::fs::read_to_string(root.join(".ambidiff.json")).expect("review file");
+    let value: serde_json::Value = serde_json::from_str(&content).expect("json");
+    assert_eq!(
+        value["revision"], 1,
+        "resolving addressed comments does not bump revision"
+    );
+
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+/// `Esc` on the confirm dialog leaves the review file byte-for-byte
+/// unchanged.
+#[test]
+fn resolve_addressed_esc_cancels_without_writing() {
+    let (_dir, root) = scratch_repo();
+    let addressed_id = cli_add_comment(&root, "fix the jump to 2000");
+    cli_address_comment(&root, &addressed_id, "done, see the fix");
+
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "src/app.ts", "initial render");
+    let before = std::fs::read_to_string(root.join(".ambidiff.json")).expect("review file before");
+
+    send(&mut session, "X");
+    wait_for(
+        &mut session,
+        "resolve 1 addressed comments?",
+        "confirm dialog shows the addressed count",
+    );
+    send(&mut session, "\x1b"); // Esc cancels
+
+    let after = std::fs::read_to_string(root.join(".ambidiff.json")).expect("review file after");
+    assert_eq!(
+        before, after,
+        "cancelling the dialog must not write anything"
+    );
+
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+/// `X` with nothing addressed flashes and never opens the confirm dialog.
+#[test]
+fn resolve_addressed_with_nothing_addressed_flashes_without_confirming() {
+    let (_dir, root) = scratch_repo();
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "src/app.ts", "initial render");
+
+    send(&mut session, "X");
+    wait_for_all(
+        &mut session,
+        &["no addressed comments to resolve"],
+        "flash instead of a confirm dialog",
+    );
+
     send(&mut session, "q");
     wait_for_exit(&mut session);
 }

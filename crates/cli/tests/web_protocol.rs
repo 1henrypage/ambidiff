@@ -566,6 +566,62 @@ fn addressing_with_an_empty_response_transitions_and_stores_none() {
 }
 
 #[test]
+fn resolve_addressed_over_the_websocket_flips_only_addressed_and_broadcasts() {
+    let (_dir, root) = scratch_repo();
+    let server = Server::spawn(&root);
+    let (mut ws, _) = server.client();
+
+    let open = request(
+        &mut ws,
+        json!({"type": "comment.add", "id": 1, "body": "stays open"}),
+    );
+    let open_id = open["comment"]["id"].as_str().expect("id").to_string();
+    let addressed = request(
+        &mut ws,
+        json!({"type": "comment.add", "id": 2, "body": "gets addressed"}),
+    );
+    let addressed_id = addressed["comment"]["id"].as_str().expect("id").to_string();
+    request(
+        &mut ws,
+        json!({"type": "comment.address", "id": 3, "commentId": addressed_id, "response": "done"}),
+    );
+    wait_for_type(&mut ws, "reviewChanged", Duration::from_secs(15));
+
+    let resolved = request(
+        &mut ws,
+        json!({"type": "comment.resolveAddressed", "id": 4}),
+    );
+    assert_eq!(resolved["type"], "resolvedAddressed", "{resolved}");
+    assert_eq!(
+        keys(&resolved),
+        keys(&fixture("web-resolved-addressed.json"))
+    );
+    assert_eq!(
+        resolved["commentIds"].as_array().expect("ids"),
+        &vec![Value::String(addressed_id.clone())]
+    );
+
+    // The page also hears about it through the broadcast.
+    let changed = wait_for_type(&mut ws, "reviewChanged", Duration::from_secs(15));
+    assert_eq!(keys(&changed), keys(&fixture("web-review-changed.json")));
+
+    let review = cli(&root, &["comment", "list", "--json"]);
+    let comments = review["comments"].as_array().expect("comments");
+    let open_status = comments
+        .iter()
+        .find(|c| c["id"] == open_id)
+        .expect("open comment")["status"]
+        .clone();
+    let addressed_status = comments
+        .iter()
+        .find(|c| c["id"] == addressed_id)
+        .expect("addressed comment")["status"]
+        .clone();
+    assert_eq!(open_status, "open", "untouched comment stays open");
+    assert_eq!(addressed_status, "resolved", "addressed comment resolved");
+}
+
+#[test]
 fn slow_subscriber_does_not_block_others_and_is_dropped_on_write_timeout() {
     let (_dir, root) = scratch_repo();
     let server = Server::spawn(&root);

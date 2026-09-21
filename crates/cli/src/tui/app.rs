@@ -170,7 +170,15 @@ pub enum Overlay {
     None,
     Help,
     Editor(Box<EditorState>),
-    ConfirmDelete { id: String },
+    Confirm(ConfirmAction),
+}
+
+/// What a `y` in the confirm overlay does; `render` picks title/body/hint
+/// per variant and `mod.rs` dispatches the matching action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmAction {
+    DeleteComment { id: String },
+    ResolveAddressed { count: usize },
 }
 
 pub struct SearchState {
@@ -487,8 +495,29 @@ impl App {
         }
     }
 
-    pub fn open_confirm_delete(&mut self, id: String) {
-        self.overlay = Overlay::ConfirmDelete { id };
+    pub fn open_confirm(&mut self, action: ConfirmAction) {
+        self.overlay = Overlay::Confirm(action);
+    }
+
+    /// `X`: mirrors the read-only guard `open_comment_editor` applies, then
+    /// either flashes (nothing addressed - never reaches the store) or
+    /// opens the confirm dialog with the count to resolve.
+    pub fn request_resolve_addressed(&mut self) {
+        if self.snapshot.read_only {
+            let reason = self
+                .snapshot
+                .read_only_reason
+                .clone()
+                .unwrap_or_else(|| "newer schema".to_string());
+            self.flash(&format!("review file is read-only ({reason})"));
+            return;
+        }
+        let count = self.snapshot.review.counts().addressed;
+        if count == 0 {
+            self.flash("no addressed comments to resolve");
+        } else {
+            self.open_confirm(ConfirmAction::ResolveAddressed { count });
+        }
     }
 
     pub fn quit(&self) -> bool {
@@ -1618,7 +1647,26 @@ impl App {
         match self.app.execute(ReviewCommand::Delete(
             ambidiff_core::protocol::CommentDeleteRequest { id: id.to_string() },
         )) {
-            Ok(_) => self.refresh(RefreshKind::Review),
+            Ok(_) => {
+                self.refresh(RefreshKind::Review);
+                self.flash("comment deleted");
+            }
+            Err(err) => self.flash(&format!("save failed: {err}")),
+        }
+    }
+
+    pub fn resolve_addressed(&mut self) {
+        match self.app.execute(ReviewCommand::ResolveAddressed {
+            actor: Actor::Human,
+        }) {
+            Ok(outcome) => {
+                self.refresh(RefreshKind::Review);
+                let count = match outcome.value {
+                    crate::application::OutcomeValue::ResolvedAddressed(ids) => ids.len(),
+                    _ => 0,
+                };
+                self.flash(&format!("resolved {count} addressed comments"));
+            }
             Err(err) => self.flash(&format!("save failed: {err}")),
         }
     }

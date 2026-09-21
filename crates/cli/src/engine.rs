@@ -54,6 +54,7 @@ pub const METHODS: &[&str] = &[
     "comment.address",
     "comment.resolve",
     "comment.reopen",
+    "comment.resolveAddressed",
     "rev.bump",
     "shutdown",
 ];
@@ -352,6 +353,9 @@ impl Engine {
             "comment.address" => self.lifecycle(params, Action::Address, Actor::Agent),
             "comment.resolve" => self.lifecycle(params, Action::Resolve, Actor::Human),
             "comment.reopen" => self.lifecycle(params, Action::Reopen, Actor::Human),
+            "comment.resolveAddressed" => self.execute(ReviewCommand::ResolveAddressed {
+                actor: Actor::Human,
+            }),
             "rev.bump" => self.execute(ReviewCommand::RevBump),
             other => Err(RpcError::method_not_found(other)),
         }
@@ -373,6 +377,7 @@ impl Engine {
         Ok(match outcome.value {
             OutcomeValue::Comment(comment) => serde_json::to_value(&comment).unwrap_or(Value::Null),
             OutcomeValue::Deleted(id) => json!({"deleted": id}),
+            OutcomeValue::ResolvedAddressed(ids) => json!({"resolvedAddressed": ids}),
             OutcomeValue::Revision(revision) => json!({"revision": revision}),
         })
     }

@@ -16,7 +16,7 @@ use ratatui::layout::Rect;
 
 use crate::args::TuiArgs;
 use crate::context::resolve_store;
-use app::{App, DRow, EditorIntent, FileTarget, Focus, Overlay};
+use app::{App, ConfirmAction, DRow, EditorIntent, FileTarget, Focus, Overlay};
 use render::Hit;
 
 pub fn run(args: TuiArgs) -> Result<i32> {
@@ -127,12 +127,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
             return;
         }
-        Overlay::ConfirmDelete { id } => {
-            let id = id.clone();
+        Overlay::Confirm(action) => {
+            let action = action.clone();
             match key.code {
                 KeyCode::Char('y') => {
                     app.discard_editor();
-                    app.delete_comment(&id);
+                    match action {
+                        ConfirmAction::DeleteComment { id } => app.delete_comment(&id),
+                        ConfirmAction::ResolveAddressed { .. } => app.resolve_addressed(),
+                    }
                 }
                 KeyCode::Esc | KeyCode::Char('n') => app.discard_editor(),
                 _ => {}
@@ -425,12 +428,18 @@ fn run_command(app: &mut App, command: &str, count: Option<u32>) {
         }
         "ambidiff.review.deleteComment" => {
             if let Some(idx) = app.comment_at_cursor() {
-                let id = app.review().comments[idx].id.clone();
-                app.open_confirm_delete(id);
+                let comment = &app.review().comments[idx];
+                let (id, status) = (comment.id.clone(), comment.status);
+                if status.delete_needs_confirm() {
+                    app.open_confirm(ConfirmAction::DeleteComment { id });
+                } else {
+                    app.delete_comment(&id);
+                }
             } else {
                 app.flash("cursor is not on a comment");
             }
         }
+        "ambidiff.review.resolveAddressed" => app.request_resolve_addressed(),
         "ambidiff.search.start" => app.start_search(),
         "ambidiff.search.next" => app.search_step(true),
         "ambidiff.search.prev" => app.search_step(false),

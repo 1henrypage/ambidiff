@@ -321,6 +321,43 @@ impl ReviewFile {
         Ok(&self.comments[idx])
     }
 
+    /// Resolve every `addressed` comment in one batch (HUMAN ONLY): the
+    /// bulk sign-off for a finished agent pass. A single probe transition
+    /// through the lifecycle state machine enforces the human-only rule and
+    /// yields the target status, so the rule is never restated here - and,
+    /// because the probe runs even when nothing is addressed, an agent
+    /// calling this on a clean review still gets `HumanOnly` rather than a
+    /// silent no-op. Pre-filtering to `Addressed` means every transition
+    /// this batch performs is legal, so it cannot fail partway; it also
+    /// means this can never bump `revision` (only a reopen does that).
+    /// Returns the ids that were flipped, in review order.
+    pub fn resolve_addressed(
+        &mut self,
+        actor: Actor,
+        now: &str,
+    ) -> Result<Vec<String>, ReviewError> {
+        let next = lifecycle::transition(Status::Addressed, Action::Resolve, actor)?;
+        let ids: Vec<String> = self
+            .comments
+            .iter()
+            .filter(|c| c.status == Status::Addressed)
+            .map(|c| c.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        for comment in self
+            .comments
+            .iter_mut()
+            .filter(|c| c.status == Status::Addressed)
+        {
+            comment.status = next;
+            comment.updated_at = now.to_string();
+        }
+        self.updated_at = now.to_string();
+        Ok(ids)
+    }
+
     /// Manual revision bump: the escape hatch when pass detection does not
     /// match reality. Fails without mutating anything at `u32::MAX`.
     pub fn try_rev_bump(&mut self, now: &str) -> Result<u32, ReviewError> {
@@ -1140,6 +1177,147 @@ mod tests {
             review.apply_lifecycle("nope", Action::Address, Actor::Agent, None, "t"),
             Err(ReviewError::CommentNotFound { .. })
         ));
+    }
+
+    // --- resolve_addressed ----------------------------------------------
+
+    /// Six comments spanning all four statuses: c-0,c-1 open; c-2,c-3
+    /// addressed; c-4 resolved; c-5 reopened (the `review.rs:1005` idiom).
+    fn six_comment_review() -> ReviewFile {
+        let mut review = base_file();
+        for (i, body) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+            review
+                .try_add_comment(new_comment(body), format!("c-{i}"), "t")
+                .expect("add comment");
+        }
+        for id in ["c-2", "c-3", "c-4", "c-5"] {
+            review
+                .apply_lifecycle(id, Action::Address, Actor::Agent, None, "t")
+                .expect("address");
+        }
+        review
+            .apply_lifecycle("c-4", Action::Resolve, Actor::Human, None, "t")
+            .expect("resolve");
+        review
+            .apply_lifecycle("c-5", Action::Reopen, Actor::Human, None, "t")
+            .expect("reopen");
+        review
+    }
+
+    #[test]
+    fn resolve_addressed_flips_only_addressed_comments() {
+        let mut review = six_comment_review();
+        let ids = review
+            .resolve_addressed(Actor::Human, "t2")
+            .expect("resolve addressed");
+        assert_eq!(ids, vec!["c-2".to_string(), "c-3".to_string()]);
+        assert_eq!(review.comments[0].status, Status::Open, "c-0 untouched");
+        assert_eq!(review.comments[1].status, Status::Open, "c-1 untouched");
+        assert_eq!(review.comments[2].status, Status::Resolved, "c-2 flipped");
+        assert_eq!(review.comments[3].status, Status::Resolved, "c-3 flipped");
+        assert_eq!(
+            review.comments[4].status,
+            Status::Resolved,
+            "c-4 already resolved, untouched"
+        );
+        assert_eq!(review.comments[5].status, Status::Reopened, "c-5 untouched");
+    }
+
+    #[test]
+    fn agent_resolve_addressed_is_rejected_with_human_only() {
+        let mut review = six_comment_review();
+        let before = review.clone();
+        let err = review
+            .resolve_addressed(Actor::Agent, "t2")
+            .expect_err("agent must be rejected");
+        assert!(matches!(
+            err,
+            ReviewError::Lifecycle(LifecycleError::HumanOnly { .. })
+        ));
+        assert_eq!(review, before, "no mutation on rejection");
+
+        // Regression for the probe-first design: even with zero addressed
+        // comments, an agent must still be rejected, not silently no-op.
+        let mut clean = base_file();
+        clean
+            .try_add_comment(new_comment("a"), "c-1".into(), "t1")
+            .expect("add comment");
+        let before = clean.clone();
+        let err = clean
+            .resolve_addressed(Actor::Agent, "t2")
+            .expect_err("agent must be rejected even with nothing addressed");
+        assert!(matches!(
+            err,
+            ReviewError::Lifecycle(LifecycleError::HumanOnly { .. })
+        ));
+        assert_eq!(clean, before, "no mutation on rejection");
+    }
+
+    #[test]
+    fn resolve_addressed_does_not_bump_revision() {
+        let mut review = six_comment_review();
+        let before_revision = review.revision;
+        review
+            .resolve_addressed(Actor::Human, "t2")
+            .expect("resolve addressed");
+        assert_eq!(review.revision, before_revision);
+    }
+
+    #[test]
+    fn resolve_addressed_with_none_addressed_is_a_noop() {
+        let mut review = base_file();
+        review
+            .try_add_comment(new_comment("a"), "c-1".into(), "t1")
+            .expect("add comment");
+        let before = review.clone();
+        let ids = review
+            .resolve_addressed(Actor::Human, "t2")
+            .expect("resolve addressed");
+        assert!(ids.is_empty());
+        assert_eq!(review, before, "no mutation when nothing is addressed");
+    }
+
+    #[test]
+    fn resolve_addressed_completes_the_pass() {
+        let mut review = base_file();
+        review
+            .try_add_comment(new_comment("a"), "c-1".into(), "t1")
+            .expect("add comment");
+        review
+            .apply_lifecycle("c-1", Action::Address, Actor::Agent, None, "t2")
+            .expect("address");
+        review
+            .resolve_addressed(Actor::Human, "t3")
+            .expect("resolve addressed");
+        assert_eq!(review.comments[0].rev, 1, "provenance preserved");
+
+        review
+            .try_add_comment(new_comment("b"), "c-2".into(), "t4")
+            .expect("add comment");
+        assert_eq!(review.revision, 2, "next comment opens pass 2");
+        assert_eq!(review.comments[1].rev, 2);
+        assert_eq!(review.comments[0].rev, 1, "earlier rev untouched");
+    }
+
+    #[test]
+    fn resolve_addressed_stamps_updated_at_on_touched_comments_only() {
+        let mut review = six_comment_review();
+        let untouched_before = (
+            review.comments[0].updated_at.clone(),
+            review.comments[1].updated_at.clone(),
+            review.comments[4].updated_at.clone(),
+            review.comments[5].updated_at.clone(),
+        );
+        review
+            .resolve_addressed(Actor::Human, "t2")
+            .expect("resolve addressed");
+        assert_eq!(review.comments[2].updated_at, "t2");
+        assert_eq!(review.comments[3].updated_at, "t2");
+        assert_eq!(review.updated_at, "t2");
+        assert_eq!(review.comments[0].updated_at, untouched_before.0);
+        assert_eq!(review.comments[1].updated_at, untouched_before.1);
+        assert_eq!(review.comments[4].updated_at, untouched_before.2);
+        assert_eq!(review.comments[5].updated_at, untouched_before.3);
     }
 
     #[test]

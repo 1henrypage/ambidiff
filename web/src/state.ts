@@ -576,6 +576,16 @@ export class Store {
     return anchor;
   }
 
+  /** Whether deleting a comment in `status` should ask the human first.
+   * Fails safe toward asking: a thrown core call is treated as "confirm". */
+  deleteNeedsConfirm(status: import("./protocol").Status): boolean {
+    try {
+      return this.core.deleteNeedsConfirm(status);
+    } catch {
+      return true;
+    }
+  }
+
   // -------------------------------------------------------------- options
 
   cycleFilter(): void {
@@ -754,5 +764,17 @@ export class Store {
     const resp = await this.transport.request({ type: "comment.reopen", commentId: id });
     if (resp.type !== "comment") throw new Error(`unexpected response ${resp.type}`);
     return resp.comment;
+  }
+
+  /** How many comments are currently `addressed`, for the confirm prompt. */
+  addressedCount(): number {
+    return this.summary?.counts.addressed ?? 0;
+  }
+
+  async resolveAddressed(): Promise<string[]> {
+    this.ensureWritable();
+    const resp = await this.transport.request({ type: "comment.resolveAddressed" });
+    if (resp.type !== "resolvedAddressed") throw new Error(`unexpected response ${resp.type}`);
+    return resp.commentIds;
   }
 }

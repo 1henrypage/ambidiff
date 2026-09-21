@@ -87,11 +87,16 @@
     },
     {
       "id": 13,
-      "method": "rev.bump",
+      "method": "comment.resolveAddressed",
       "params": {}
     },
     {
       "id": 14,
+      "method": "rev.bump",
+      "params": {}
+    },
+    {
+      "id": 15,
       "method": "shutdown"
     }
   ],
@@ -150,8 +155,12 @@
       "commentId": "c-7f3a2b1c"
     },
     {
-      "type": "rev.bump",
+      "type": "comment.resolveAddressed",
       "id": 11
+    },
+    {
+      "type": "rev.bump",
+      "id": 12
     }
   ]
 }

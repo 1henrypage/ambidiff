@@ -26,6 +26,13 @@ impl Status {
         matches!(self, Status::Open | Status::Reopened)
     }
 
+    /// True when deleting a comment in this status should ask the human first.
+    /// A resolved comment is finished business - the human already passed
+    /// judgment, so `D` acts at once; everything else may still be live.
+    pub fn delete_needs_confirm(self) -> bool {
+        !matches!(self, Status::Resolved)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Open => "open",
@@ -190,5 +197,13 @@ mod tests {
         assert!(Reopened.is_todo());
         assert!(!Addressed.is_todo());
         assert!(!Resolved.is_todo());
+    }
+
+    #[test]
+    fn delete_needs_confirm_only_for_non_resolved() {
+        assert!(Open.delete_needs_confirm());
+        assert!(Addressed.delete_needs_confirm());
+        assert!(Reopened.delete_needs_confirm());
+        assert!(!Resolved.delete_needs_confirm());
     }
 }
