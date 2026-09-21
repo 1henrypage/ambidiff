@@ -15,13 +15,20 @@
 //! watch signature together and bumps the generation, so every cached view
 //! is reloaded against the new comparison.
 //!
+//! Re-pinning: a git source pins its comparison when opened. Every dirty
+//! load re-resolves it and re-opens the source when the live resolution
+//! moved (a rebase moved the merge base of a branch review; a commit
+//! review of `HEAD` moved on), so a session never keeps diffing against a
+//! stale pin until restart. A re-resolution failure keeps the pin and is
+//! reported as the snapshot's source error, never a silent fallback.
+//!
 //! Stacks: the selected target is PER PROCESS (this struct's `selected`),
 //! never written to the review file. Selecting a target rebuilds the git
 //! source exactly like a `source` change does; every dirty load in stack
-//! mode re-resolves the stack so a restack (tips moved, a PR merged away)
-//! refreshes the target strip. A selection whose branch left the stack
-//! falls back to the whole-stack target with a warning, never to a
-//! neighbouring PR.
+//! mode re-opens unconditionally so a restack (tips moved, a PR merged
+//! away) refreshes the target strip even when the selected diff is the
+//! same. A selection whose branch left the stack falls back to the
+//! whole-stack target with a warning, never to a neighbouring PR.
 //!
 //! Unsaved reviews: `ambidiff --commit X` / `--stack` open without a review
 //! file (`open_ephemeral`); the pending review is served as if loaded and
@@ -481,18 +488,44 @@ impl Application {
             .is_some_and(|c| c.kind == "git" && c.spec.is_stack())
     }
 
+    /// Re-resolve the pinned comparison and re-open the source when the
+    /// live resolution differs (see the module docs). Returns the error to
+    /// surface when re-resolution fails; the pin is kept in that case.
+    fn repin_source(&mut self) -> Option<String> {
+        let source = self.source.as_ref()?;
+        let moved = source
+            .resolve_current()
+            .map(|live| live != *source.comparison());
+        match moved {
+            Ok(true) => {
+                self.reopen_source();
+                None
+            }
+            Ok(false) => None,
+            Err(e) => Some(format!("comparison could not be re-resolved: {e}")),
+        }
+    }
+
     /// Take the held snapshot: the review (errors keep the previous
     /// snapshot), the source reconfigured when its configuration changed,
     /// and the listing re-taken when the diff is dirty (a listing failure
-    /// keeps the previous files and records the error). In stack mode a
-    /// dirty load also re-resolves the stack, so the targets follow a
-    /// restack.
+    /// keeps the previous files and records the error). A dirty load also
+    /// re-resolves the comparison: stack mode re-opens unconditionally so
+    /// the targets follow a restack; every other mode re-opens only when
+    /// the live resolution moved.
     pub fn load(&mut self) -> Result<&Snapshot, AppError> {
         let outcome = self.load_outcome()?;
         let reopened = self.reconfigure(&outcome.review.source);
-        if self.diff_dirty && !reopened && self.is_stack_configured() {
-            self.reopen_source();
-        }
+        let repin_error = if self.diff_dirty && !reopened {
+            if self.is_stack_configured() {
+                self.reopen_source();
+                None
+            } else {
+                self.repin_source()
+            }
+        } else {
+            None
+        };
 
         let previous = self.snapshot.take();
         let (files, skipped, source_error, generation) = match previous {
@@ -529,10 +562,13 @@ impl Application {
             .source
             .as_ref()
             .and_then(|s| s.commit_summary().cloned());
-        // A listing can succeed while the watch's signature computation
-        // fails (a git deadline under load): surface that too, so the
-        // frontends never show a silent stale state.
-        let source_error = source_error.or_else(|| self.last_diff_error());
+        // A listing can succeed while the re-pin or the watch's signature
+        // computation fails (a deleted base ref, a git deadline under
+        // load): surface that too, so the frontends never show a silent
+        // stale state.
+        let source_error = source_error
+            .or(repin_error)
+            .or_else(|| self.last_diff_error());
         let mut warnings = outcome.warnings;
         if let Some(conflict) = outcome.review.source.conflict_warning() {
             warnings.push(conflict);
@@ -1028,6 +1064,166 @@ pub fn spec_of(capability: &Capability) -> Option<&'static CommandSpec> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use ambidiff_core::source::Endpoint;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(root: &Path, path: &str, content: &str) {
+        std::fs::write(root.join(path), content).expect("write");
+    }
+
+    /// `B - U (main)` and `B - F (feature, checked out)`, with a review
+    /// file selecting `source`.
+    fn feature_checkout(source: Source) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
+        write(&root, "shared.txt", "shared\n");
+        write(&root, "feature.txt", "feature v1\n");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "B"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        write(&root, "feature.txt", "feature v2\n");
+        git(&root, &["commit", "-qam", "F"]);
+        git(&root, &["checkout", "-q", "main"]);
+        write(&root, "upstream.txt", "u\n");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "U"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        Store::new(&root)
+            .init(&ReviewFile::new("t".into(), source, &now_rfc3339()))
+            .expect("init");
+        assert_eq!(
+            exclude_review_from_git(&root),
+            None,
+            "exclude the review file"
+        );
+        (dir, root)
+    }
+
+    /// The real startup order: arm the watch, then take the first load.
+    fn open_loaded(root: &Path) -> Application {
+        let mut app = Application::open(Store::new(root));
+        app.start_watch().expect("watch");
+        app.load().expect("load");
+        app
+    }
+
+    fn paths(snapshot: &Snapshot) -> Vec<&str> {
+        snapshot.files.iter().map(|e| e.path.as_str()).collect()
+    }
+
+    fn old_oid(snapshot: &Snapshot) -> String {
+        match &snapshot.comparison {
+            Some(Comparison {
+                old: Endpoint::Commit { oid },
+                ..
+            }) => oid.clone(),
+            other => panic!("expected a commit on the old side, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dirty_load_repins_a_moved_merge_base() {
+        let (_dir, root) = feature_checkout(Source::git(Some("main".into())));
+        let mut app = open_loaded(&root);
+        let snapshot = app.snapshot().expect("loaded");
+        assert_eq!(
+            old_oid(snapshot),
+            git_stdout(&root, &["rev-parse", "main~1"])
+        );
+        assert_eq!(paths(snapshot), vec!["feature.txt"]);
+        let generation = snapshot.generation;
+
+        git(&root, &["rebase", "-q", "main"]);
+        let snapshot = app.refresh().expect("refresh");
+        assert_eq!(
+            old_oid(snapshot),
+            git_stdout(&root, &["rev-parse", "main"]),
+            "the pin follows the merge base to main's tip"
+        );
+        assert_eq!(
+            paths(snapshot),
+            vec!["feature.txt"],
+            "upstream.txt never appears as a deletion"
+        );
+        assert!(snapshot.generation > generation, "views must reload");
+        assert_eq!(snapshot.source_error, None);
+        app.stop();
+    }
+
+    #[test]
+    fn dirty_load_keeps_the_pinned_source_when_re_resolution_fails() {
+        let (_dir, root) = feature_checkout(Source::git(Some("main".into())));
+        let mut app = open_loaded(&root);
+        let before = app.snapshot().expect("loaded").clone();
+
+        git(&root, &["branch", "-D", "main"]);
+        let snapshot = app.refresh().expect("refresh");
+        let error = snapshot
+            .source_error
+            .clone()
+            .expect("the failure is surfaced");
+        assert!(
+            error.contains("could not be re-resolved") && error.contains("main"),
+            "{error}"
+        );
+        assert_eq!(snapshot.comparison, before.comparison, "the pin is kept");
+        assert_eq!(paths(snapshot), paths(&before), "the listing still works");
+        app.stop();
+    }
+
+    #[test]
+    fn commit_mode_follows_head_on_a_dirty_load() {
+        let (_dir, root) = feature_checkout(Source::git_commit("HEAD"));
+        let mut app = open_loaded(&root);
+        let first = app
+            .snapshot()
+            .expect("loaded")
+            .commit
+            .clone()
+            .expect("commit");
+        assert_eq!(first.oid, git_stdout(&root, &["rev-parse", "HEAD"]));
+        assert_eq!(first.subject, "F");
+
+        write(&root, "feature.txt", "feature v3\n");
+        git(&root, &["commit", "-qam", "F2"]);
+        let snapshot = app.refresh().expect("refresh");
+        let commit = snapshot.commit.clone().expect("commit");
+        assert_eq!(commit.oid, git_stdout(&root, &["rev-parse", "HEAD"]));
+        assert_eq!(commit.subject, "F2");
+        assert_eq!(snapshot.source_error, None);
+        app.stop();
+    }
 
     #[test]
     fn capability_table_is_exhaustive() {

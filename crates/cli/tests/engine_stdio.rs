@@ -962,3 +962,70 @@ fn flags_that_disagree_with_the_review_file_fail_and_agreeing_flags_open() {
         .expect("engine");
     assert_eq!(out.status.code(), Some(1), "a different upstream disagrees");
 }
+
+// ---------------------------------------------------------------------
+// Branch reviews re-pin when the merge base moves
+// ---------------------------------------------------------------------
+
+#[test]
+fn rebase_moves_the_merge_base_and_files_follow() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(&root, "feature.txt", "feature v1\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "B"]);
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "feature.txt", "feature v2\n");
+    git(&root, &["commit", "-qam", "F"]);
+    git(&root, &["checkout", "-q", "main"]);
+    write(&root, "upstream.txt", "u\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "U"]);
+    git(&root, &["checkout", "-q", "feature"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
+        .args(["init", "--review", "branch", "--base", "main"])
+        .current_dir(&root)
+        .output()
+        .expect("init");
+    assert!(out.status.success());
+    let rev = |spec: &str| {
+        let out = Command::new("git")
+            .args(["rev-parse", spec])
+            .current_dir(&root)
+            .output()
+            .expect("rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let mut client = EngineClient::spawn(&root);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(init["comparison"]["old"]["oid"], rev("main~1"), "{init}");
+    let files = client.request("files", serde_json::json!({}));
+    let paths: Vec<&str> = files["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(paths, vec!["feature.txt"]);
+
+    git(&root, &["rebase", "-q", "main"]);
+    client.expect_notification("diffChanged", Duration::from_secs(15));
+    let files = client.request("files", serde_json::json!({}));
+    assert_eq!(
+        files["comparison"]["old"]["oid"],
+        rev("main"),
+        "re-pinned to the new merge base: {files}"
+    );
+    let paths: Vec<&str> = files["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(paths, vec!["feature.txt"], "the tree stays identical");
+    assert_eq!(files["sourceError"], serde_json::Value::Null);
+    client.shutdown();
+}
