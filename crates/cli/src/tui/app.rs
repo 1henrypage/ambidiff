@@ -15,7 +15,7 @@ use ambidiff_core::protocol::{CommentAddRequest, CommentEditRequest, LifecycleRe
 use ambidiff_core::review::{Action, Actor, Comment, Side};
 use ambidiff_core::rows::{Row, ViewMode};
 use ambidiff_core::search::{SearchMatch, search_rows};
-use ambidiff_core::source::CommitSummary;
+use ambidiff_core::source::{CommitSummary, ListingState};
 use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::tree::TreeRow;
 use ambidiff_core::view::ViewOptions;
@@ -359,6 +359,21 @@ impl App {
         self.snapshot.read_only
     }
 
+    pub fn listing(&self) -> ListingState {
+        self.snapshot.listing
+    }
+
+    pub fn source_error(&self) -> Option<&str> {
+        self.snapshot.source_error.as_deref()
+    }
+
+    /// The tree's explanatory line when the listing needs one ("no
+    /// changes", "source unavailable", "showing previous listing"); counts
+    /// the whole listing, never the filtered rows.
+    pub fn tree_placeholder(&self) -> Option<&'static str> {
+        self.snapshot.listing.placeholder(self.snapshot.files.len())
+    }
+
     pub fn files(&self) -> &[ambidiff_core::model::FileEntry] {
         &self.snapshot.files
     }
@@ -676,11 +691,16 @@ impl App {
     /// changed and wrap is on, rebuilds the wrapped rows so they reflow to
     /// the new width (B25). The two budgets move independently when a
     /// resize is absorbed entirely by the gutter, so both are compared.
+    /// The overview's source-error section is wrapped to the card width
+    /// regardless of wrap mode, so it reflows on a budget change too
+    /// (the first frame lays it out at a fallback width).
     pub fn apply_layout(&mut self, layout: render::Layout) {
         let budgets = |l: &render::Layout| (l.content_width, l.card_width);
         let changed = self.last_layout.as_ref().map(budgets) != Some(budgets(&layout));
         self.last_layout = Some(layout);
-        if changed && self.wrap {
+        let width_dependent_section =
+            matches!(self.target, FileTarget::Overview) && self.snapshot.source_error.is_some();
+        if changed && (self.wrap || width_dependent_section) {
             self.rebuild_display_preserving_cursor();
             self.reflow_dirty = true;
         }
@@ -1098,13 +1118,15 @@ impl App {
         for warning in &self.snapshot.warnings {
             display.push(DRow::Notice(format!("warning: {warning}")));
         }
-        if let Some(err) = &self.snapshot.source_error {
-            display.push(DRow::Notice(format!("source: {err}")));
-        }
 
         match self.target.clone() {
             FileTarget::Overview => self.build_overview_display(&mut display),
-            FileTarget::File(_) => self.build_file_display(&mut display),
+            FileTarget::File(_) => {
+                if let Some(err) = &self.snapshot.source_error {
+                    display.push(DRow::Notice(format!("source: {err}")));
+                }
+                self.build_file_display(&mut display)
+            }
         }
 
         self.display = display;
@@ -1167,7 +1189,35 @@ impl App {
         display.push(DRow::CommentFoot { comment: pane_idx });
     }
 
+    /// The overview's diagnosis of a broken or failing source: a section
+    /// naming the configured source, the error wrapped to the pane, and
+    /// what to do about it. A file view gets the one-line notice instead.
+    fn push_source_error_section(&self, display: &mut Vec<DRow>) {
+        let Some(err) = &self.snapshot.source_error else {
+            return;
+        };
+        display.push(DRow::SectionHead(format!(
+            "source {}",
+            self.snapshot.review.source.describe()
+        )));
+        let width = self.effective_card_width();
+        for line in wrap::card_lines(err, Some(width)) {
+            display.push(DRow::Notice(line));
+        }
+        let hint = match self.snapshot.listing {
+            ListingState::Stale => {
+                "showing the previous listing; fix `source` in .ambidiff.json (or the ref) and press r to retry"
+            }
+            _ => "fix `source` in .ambidiff.json (or the ref) and press r to retry",
+        };
+        for line in wrap::card_lines(hint, Some(width)) {
+            display.push(DRow::Notice(line));
+        }
+        display.push(DRow::Blank);
+    }
+
     fn build_overview_display(&mut self, display: &mut Vec<DRow>) {
+        self.push_source_error_section(display);
         let cards = self.card_layout();
         let review_level: Vec<usize> = self
             .projected

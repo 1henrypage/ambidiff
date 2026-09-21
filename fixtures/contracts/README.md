@@ -77,6 +77,22 @@ non-stack review fails with kind `notStackReview`, a target that is not
 in the stack with `unknownTarget`; both are invalid input (`-32602` on
 stdio).
 
+## Listing state
+
+Every snapshot-like message also carries `listing`, one of `fresh` (the
+files are this load's listing), `stale` (the last listing attempt failed
+and the files are the previous successful listing, kept) or `unavailable`
+(no listing could be produced: the source never opened, or failed before
+any listing succeeded; `files` is `[]`). A failed listing is therefore
+never confused with a successful empty one: `sourceError` says why, and
+`listing` says what the files mean. `listing-state.json` pins the three
+spellings and the tree placeholder each state paints for a given file
+count (`no changes`, `showing previous listing`, `source unavailable`, or
+none), which every frontend derives from the same rule. A message built
+before any snapshot loaded (`snapshot` with `readOnlyReason: "review not
+loaded"`, or a `diffChanged` whose `sourceError` says so) is
+`unavailable`.
+
 ## Error envelopes
 
 Stdio: `{"id", "error": {"code", "message", "data": {"kind"}}}` with

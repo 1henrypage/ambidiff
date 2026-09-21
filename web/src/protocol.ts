@@ -884,6 +884,27 @@ export const CLIENT_MESSAGE_TYPES = [
 
 // ------------------------------------------------- server -> client messages
 
+/** How a snapshot's file listing relates to its source: this load's
+ * listing, a kept previous one after a failed attempt, or nothing at all.
+ * A failed listing is never shown as an empty one. */
+export type ListingState = "fresh" | "stale" | "unavailable";
+export const LISTING_STATES: readonly ListingState[] = ["fresh", "stale", "unavailable"] as const;
+
+/** Tree placeholder when the listing needs explaining, `null` when the
+ * files speak for themselves; mirrors the core's `ListingState::placeholder`
+ * (`fixtures/contracts/listing-state.json`). `fileCount` is the whole
+ * listing, never a filtered view of it. */
+export function listingPlaceholder(state: ListingState, fileCount: number): string | null {
+  switch (state) {
+    case "fresh":
+      return fileCount === 0 ? "no changes" : null;
+    case "stale":
+      return "showing previous listing";
+    case "unavailable":
+      return "source unavailable";
+  }
+}
+
 /** Fields shared by `hello` and `snapshot` (one builder on the server). */
 export interface SnapshotFields {
   appVersion: string;
@@ -895,6 +916,7 @@ export interface SnapshotFields {
   readOnly: boolean;
   readOnlyReason: string | null;
   sourceError: string | null;
+  listing: ListingState;
   skipped: SkippedPath[];
   comparison: Comparison | null;
   /** The stack's targets in order (`[]` outside stack reviews). */
@@ -904,7 +926,6 @@ export interface SnapshotFields {
   /** The reviewed commit of a single-commit review. */
   commit: CommitSummary | null;
   generation: number;
-  loadError?: string;
 }
 
 export interface HelloMessage extends SnapshotFields {
@@ -973,6 +994,7 @@ export interface DiffChangedMessage {
   files: FileEntry[];
   skipped: SkippedPath[];
   sourceError: string | null;
+  listing: ListingState;
   comparison: Comparison | null;
   targets: Target[];
   selected: TargetId | null;
@@ -1037,6 +1059,7 @@ function decodeSnapshotFields(o: JsonObject): SnapshotFields {
     readOnly: bool(o, "readOnly"),
     readOnlyReason: optStr(o, "readOnlyReason") ?? null,
     sourceError: optStr(o, "sourceError") ?? null,
+    listing: lit(o, "listing", LISTING_STATES),
     skipped: arr(o, "skipped", decodeSkippedPath),
     comparison: present(o, "comparison") === undefined ? null : decodeComparison(o["comparison"]),
     targets: arr(o, "targets", decodeTarget),
@@ -1044,8 +1067,6 @@ function decodeSnapshotFields(o: JsonObject): SnapshotFields {
     commit: present(o, "commit") === undefined ? null : decodeCommitSummary(o["commit"]),
     generation: int(o, "generation"),
   };
-  const loadError = optStr(o, "loadError");
-  if (loadError !== undefined) fields.loadError = loadError;
   return fields;
 }
 
@@ -1127,6 +1148,7 @@ export function decodeServerMessage(v: unknown): ServerMessage {
         files: arr(o, "files", decodeFileEntry),
         skipped: arr(o, "skipped", decodeSkippedPath),
         sourceError: optStr(o, "sourceError") ?? null,
+        listing: lit(o, "listing", LISTING_STATES),
         comparison: present(o, "comparison") === undefined ? null : decodeComparison(o["comparison"]),
         targets: arr(o, "targets", decodeTarget),
         selected: optTargetId(o, "selected"),

@@ -3,7 +3,7 @@
 // bodies, paths, snippets, diff content) reaches the DOM through text
 // nodes / `textContent`, never `innerHTML`, so nothing a repo or a
 // reviewer wrote can inject markup.
-import { type Cell, type Row, type TargetId, sameTarget } from "./protocol";
+import { type Cell, type Row, type TargetId, listingPlaceholder, sameTarget } from "./protocol";
 import { HeightIndex, type CommentRecord, type DisplayLine, type Segment, composeSegments, gutterDigits } from "./paint";
 import type { Store } from "./state";
 
@@ -114,6 +114,19 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
       }
       dom.tree.appendChild(div);
     });
+
+    // A failed or empty listing is explained, never left looking like a
+    // clean tree: below the rows when the listing is a kept previous one,
+    // in place of them when there are none. Counts the whole listing, not
+    // the filtered rows (a filter hiding every file is not "no changes").
+    const listing = store.diagnostics.listing;
+    const placeholder = store.isBooted ? listingPlaceholder(listing, store.files.length) : null;
+    if (placeholder !== null && (rows.length === 0 || listing === "stale")) {
+      const div = document.createElement("div");
+      div.className = "tree-row placeholder";
+      div.textContent = placeholder;
+      dom.tree.appendChild(div);
+    }
   }
 
   /** The target strip: one cell per target in stack order, the selected
@@ -227,6 +240,7 @@ export function createRenderer(store: Store, dom: RenderDom, win: Window, action
       ? `${s.name} rev ${s.revision} • ○${s.counts.open} ↺${s.counts.reopened} ◐${s.counts.addressed} ●${s.counts.resolved}`
       : "connecting";
     dom.statusbar.appendChild(span(null, left));
+    if (store.diagnostics.sourceError) dom.statusbar.appendChild(span("badge", "[source error]"));
     dom.statusbar.appendChild(span("msg", store.flash ?? ""));
     const toggles = [
       store.isStack() ? `target:${store.selectedLabel() ?? "-"}` : "",

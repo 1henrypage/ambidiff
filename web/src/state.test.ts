@@ -22,6 +22,7 @@ function hello(files: FileEntry[]): HelloMessage {
     readOnly: false,
     readOnlyReason: null,
     sourceError: null,
+      listing: "fresh",
     skipped: [],
     comparison: null,
     targets: [],
@@ -113,7 +114,7 @@ describe("navigation ownership (B14)", () => {
 describe("diff and review reconciliation", () => {
   test("vanished_file_switches_to_overview", async () => {
     const { store } = await bootedOn("a.ts");
-    store.onDiffChanged({ files: [{ path: "b.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
+    store.onDiffChanged({ files: [{ path: "b.ts", status: "modified" }], skipped: [], sourceError: null, listing: "fresh", targets: [], selected: null, commit: null });
     expect(store.nav).toEqual({ kind: "overview" });
     expect(store.flash).toContain("no longer in this diff");
   });
@@ -124,6 +125,7 @@ describe("diff and review reconciliation", () => {
       files: [{ path: "a2.ts", oldPath: "a.ts", status: "renamed" }],
       skipped: [],
       sourceError: null,
+      listing: "fresh",
       targets: [],
       selected: null,
       commit: null,
@@ -161,7 +163,7 @@ describe("expansion (B10)", () => {
 
     store.expandGap("g1");
     // The diff changes underneath the in-flight getSrc (bumps core.generation).
-    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
+    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, listing: "fresh", targets: [], selected: null, commit: null });
     transport.answer("getFile", "a.ts", fileMsg("a.ts"));
     await tick();
 
@@ -177,7 +179,7 @@ describe("expansion (B10)", () => {
     const restored = emptyView("a.ts");
     core.nextExpand = { expansion: { gap: { id: "g1", count: 2, oldRange: [1, 2], newRange: [1, 2] }, at: 0, rows: [] }, view: restored, comments: [] };
 
-    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, targets: [], selected: null, commit: null });
+    store.onDiffChanged({ files: [{ path: "a.ts", status: "modified" }], skipped: [], sourceError: null, listing: "fresh", targets: [], selected: null, commit: null });
     transport.answer("getFile", "a.ts", fileMsg("a.ts"));
     await tick();
     transport.answer("getSrc", "a.ts", { type: "src", id: 0, path: "a.ts", content: "full" } as SrcMessage);
@@ -443,6 +445,7 @@ describe("refresh (B22)", () => {
       readOnly: false,
       readOnlyReason: null,
       sourceError: null,
+      listing: "fresh",
       skipped: [],
       comparison: null,
       targets: [],
@@ -569,6 +572,7 @@ describe("stack targets", () => {
       files: [{ path: "src/a.ts", status: "modified" }],
       skipped: [],
       sourceError: null,
+      listing: "fresh",
       targets: stackTargets(),
       selected: { kind: "branch", name: "auth-1" },
       commit: null,
@@ -586,6 +590,7 @@ describe("stack targets", () => {
       files: [{ path: "src/a.ts", status: "modified" }],
       skipped: [],
       sourceError: null,
+      listing: "fresh",
       targets: stackTargets(),
       selected: { kind: "branch", name: "auth-1" },
       commit: null,

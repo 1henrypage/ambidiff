@@ -15,6 +15,7 @@
     }
   ],
   "sourceError": null,
+  "listing": "fresh",
   "comparison": {
     "old": {
       "kind": "commit",

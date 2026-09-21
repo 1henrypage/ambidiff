@@ -52,8 +52,8 @@ use ambidiff_core::review::{
     validate_comment_target, validate_new_comment,
 };
 use ambidiff_core::source::{
-    CommitSummary, CompareSpec, Comparison, DiffSource, FileDiffRequest, SkippedPath, SourceError,
-    SourceMode,
+    CommitSummary, CompareSpec, Comparison, DiffSource, FileDiffRequest, ListingState, SkippedPath,
+    SourceError, SourceMode,
 };
 use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::store::{Store, StoreError};
@@ -83,8 +83,12 @@ pub struct Snapshot {
     pub files: Vec<FileEntry>,
     pub skipped: Vec<SkippedPath>,
     /// The listing could not be produced (or the source could not be
-    /// opened); `files` then holds the previous listing.
+    /// opened); `files` then holds the previous listing when `listing` is
+    /// stale, nothing when it is unavailable.
     pub source_error: Option<String>,
+    /// Whether `files` is this load's listing, a kept previous one, or
+    /// nothing at all: a failed listing is never shown as an empty one.
+    pub listing: ListingState,
     pub comparison: Option<Comparison>,
     /// The stack's targets in order (empty outside stack reviews).
     pub targets: Vec<Target>,
@@ -240,6 +244,16 @@ impl AppError {
                 | "notStackReview"
                 | "unknownTarget"
         )
+    }
+}
+
+/// The listing state after a failed listing attempt: a previous listing
+/// (fresh or already stale) is kept and marked stale; nothing to keep means
+/// unavailable.
+fn listing_after_failure(previous: Option<ListingState>) -> ListingState {
+    match previous {
+        Some(ListingState::Fresh | ListingState::Stale) => ListingState::Stale,
+        Some(ListingState::Unavailable) | None => ListingState::Unavailable,
     }
 }
 
@@ -528,23 +542,39 @@ impl Application {
         };
 
         let previous = self.snapshot.take();
-        let (files, skipped, source_error, generation) = match previous {
-            Some(p) if !self.diff_dirty => (p.files, p.skipped, p.source_error, p.generation),
+        let (files, skipped, source_error, listing, generation) = match previous {
+            Some(p) if !self.diff_dirty => {
+                (p.files, p.skipped, p.source_error, p.listing, p.generation)
+            }
             previous => {
-                let (files, skipped, error) = match &self.source {
+                let (files, skipped, error, listing) = match &self.source {
                     Some(source) => match source.listing() {
-                        Ok(listing) => (listing.entries, listing.skipped, None),
+                        Ok(listing) => {
+                            (listing.entries, listing.skipped, None, ListingState::Fresh)
+                        }
                         Err(e) => {
-                            let (files, skipped) =
-                                previous.map(|p| (p.files, p.skipped)).unwrap_or_default();
-                            (files, skipped, Some(e.to_string()))
+                            let listing =
+                                listing_after_failure(previous.as_ref().map(|p| p.listing));
+                            let (files, skipped) = match (listing, previous) {
+                                (ListingState::Stale, Some(p)) => (p.files, p.skipped),
+                                _ => (Vec::new(), Vec::new()),
+                            };
+                            (files, skipped, Some(e.to_string()), listing)
                         }
                     },
-                    None => (Vec::new(), Vec::new(), self.source_error.clone()),
+                    // No source: the comparison itself is unusable, so a
+                    // previous listing (taken against another comparison)
+                    // is not worth keeping.
+                    None => (
+                        Vec::new(),
+                        Vec::new(),
+                        self.source_error.clone(),
+                        ListingState::Unavailable,
+                    ),
                 };
                 self.generation += 1;
                 self.diff_dirty = false;
-                (files, skipped, error, self.generation)
+                (files, skipped, error, listing, self.generation)
             }
         };
         let comparison = self.source.as_ref().map(|s| s.comparison().clone());
@@ -582,6 +612,7 @@ impl Application {
             files,
             skipped,
             source_error,
+            listing,
             comparison,
             targets,
             selected,
@@ -1150,6 +1181,61 @@ mod tests {
             }) => oid.clone(),
             other => panic!("expected a commit on the old side, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn listing_after_failure_keeps_a_previous_listing_as_stale_and_nothing_as_unavailable() {
+        assert_eq!(
+            listing_after_failure(Some(ListingState::Fresh)),
+            ListingState::Stale
+        );
+        assert_eq!(
+            listing_after_failure(Some(ListingState::Stale)),
+            ListingState::Stale
+        );
+        assert_eq!(
+            listing_after_failure(Some(ListingState::Unavailable)),
+            ListingState::Unavailable
+        );
+        assert_eq!(listing_after_failure(None), ListingState::Unavailable);
+    }
+
+    #[test]
+    fn a_first_load_failure_is_unavailable_and_a_later_one_keeps_files_as_stale() {
+        let (_dir, root) = feature_checkout(Source::git(Some("no-such-ref".into())));
+        let app = open_loaded(&root);
+        let snapshot = app.snapshot().expect("loaded");
+        assert_eq!(snapshot.listing, ListingState::Unavailable);
+        assert!(snapshot.files.is_empty());
+        assert!(
+            snapshot
+                .source_error
+                .as_deref()
+                .is_some_and(|e| e.contains("no-such-ref")),
+            "{:?}",
+            snapshot.source_error
+        );
+        app.stop();
+
+        let (_dir, root) = feature_checkout(Source::git(Some("main".into())));
+        let mut app = open_loaded(&root);
+        assert_eq!(app.snapshot().expect("loaded").listing, ListingState::Fresh);
+        let git_dir = root.join(".git");
+        let parked = root.join(".git-parked");
+        std::fs::rename(&git_dir, &parked).expect("park .git");
+        let snapshot = app.refresh().expect("refresh");
+        assert_eq!(snapshot.listing, ListingState::Stale);
+        assert_eq!(
+            paths(snapshot),
+            vec!["feature.txt"],
+            "the previous files are kept"
+        );
+        assert!(snapshot.source_error.is_some());
+        std::fs::rename(&parked, &git_dir).expect("restore .git");
+        let snapshot = app.refresh().expect("refresh");
+        assert_eq!(snapshot.listing, ListingState::Fresh);
+        assert_eq!(snapshot.source_error, None);
+        app.stop();
     }
 
     #[test]

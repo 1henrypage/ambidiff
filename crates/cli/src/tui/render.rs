@@ -14,6 +14,7 @@ use ambidiff_core::review::{Comment, Status};
 use ambidiff_core::rows::{Cell, CellKind, Row, ViewMode};
 use ambidiff_core::sanitize::sanitize_line;
 use ambidiff_core::search::MatchCell;
+use ambidiff_core::source::ListingState;
 use ambidiff_core::worddiff::Range as WordRange;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
@@ -504,6 +505,22 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect, scroll: usize) {
             }
         }
         lines.push(Line::from(spans).style(base));
+    }
+
+    // The listing's explanation, painted after the rows (never a cursor
+    // target, so `tree_len` and the cursor math are untouched): in place
+    // of the rows when there are none, below them when they are a kept
+    // previous listing.
+    if let Some(placeholder) = app.tree_placeholder()
+        && (app.tree_rows().is_empty() || app.listing() == ListingState::Stale)
+        && lines.len() < height
+    {
+        lines.push(Line::from(Span::styled(
+            format!("  {placeholder}"),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )));
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1115,6 +1132,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
     if app.read_only() {
         left.push_str("  [read-only]");
+    }
+    if app.source_error().is_some() {
+        left.push_str("  [source error]");
     }
     if app.is_unsaved() {
         left.push_str("  [unsaved]");

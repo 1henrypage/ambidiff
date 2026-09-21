@@ -22,7 +22,7 @@ use ambidiff_core::protocol::{
 };
 use ambidiff_core::review::{Comment, parse_review, to_json};
 use ambidiff_core::rows::{GapInfo, Row, ViewMode, build_expansion_rows};
-use ambidiff_core::source::Comparison;
+use ambidiff_core::source::{Comparison, ListingState};
 use ambidiff_core::stack::{Target, TargetId};
 use ambidiff_core::view::{ViewOptions, build_file_view};
 
@@ -225,6 +225,49 @@ fn stack_target_fixtures_are_the_core_serialisation() {
     let tagged: Comment =
         serde_json::from_value(fixture("stdio-comment-add-target.json")).expect("comment");
     assert_eq!(tagged.target, Some(selected));
+}
+
+#[test]
+fn listing_state_wire_spelling_matches_the_fixtures() {
+    let doc = fixture("listing-state.json");
+    let states: Vec<ListingState> = serde_json::from_value(doc["states"].clone()).expect("states");
+    assert_eq!(
+        states,
+        vec![
+            ListingState::Fresh,
+            ListingState::Stale,
+            ListingState::Unavailable
+        ]
+    );
+    assert_eq!(to_value(&states), doc["states"], "lowercase on the wire");
+    for name in [
+        "stdio-initialize.json",
+        "stdio-files.json",
+        "web-hello.json",
+        "web-snapshot.json",
+        "web-diff-changed.json",
+    ] {
+        let snapshot = fixture(name);
+        let state: ListingState = serde_json::from_value(snapshot["listing"].clone())
+            .unwrap_or_else(|e| panic!("{name}: listing: {e}"));
+        assert_eq!(state, ListingState::Fresh, "{name}");
+    }
+}
+
+#[test]
+fn listing_placeholder_matches_the_fixture_cases() {
+    let doc = fixture("listing-state.json");
+    let cases = doc["cases"].as_array().expect("cases");
+    assert!(!cases.is_empty());
+    for case in cases {
+        let state: ListingState = serde_json::from_value(case["listing"].clone()).expect("state");
+        let files = usize::try_from(case["files"].as_u64().expect("files")).expect("usize");
+        assert_eq!(
+            state.placeholder(files),
+            case["placeholder"].as_str(),
+            "{case}"
+        );
+    }
 }
 
 fn fixture_entry() -> FileEntry {

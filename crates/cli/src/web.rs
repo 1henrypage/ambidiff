@@ -43,6 +43,7 @@ use ambidiff_core::protocol::{
 };
 use ambidiff_core::review::{Action, Actor, Side};
 use ambidiff_core::sanitize::sanitize_line;
+use ambidiff_core::source::ListingState;
 use anyhow::{Context, Result};
 use include_dir::{Dir, include_dir};
 use serde_json::{Value, json};
@@ -366,6 +367,7 @@ fn snapshot_message(app: &Application, kind: &str, id: Option<&Value>) -> Value 
             msg["readOnly"] = json!(snapshot.read_only);
             msg["readOnlyReason"] = json!(snapshot.read_only_reason);
             msg["sourceError"] = json!(snapshot.source_error);
+            msg["listing"] = json!(snapshot.listing);
             msg["skipped"] = json!(snapshot.skipped);
             msg["comparison"] = json!(snapshot.comparison);
             msg["targets"] = json!(snapshot.targets);
@@ -380,13 +382,13 @@ fn snapshot_message(app: &Application, kind: &str, id: Option<&Value>) -> Value 
             msg["readOnly"] = json!(true);
             msg["readOnlyReason"] = json!("review not loaded");
             msg["sourceError"] = json!(null);
+            msg["listing"] = json!(ListingState::Unavailable);
             msg["skipped"] = json!([]);
             msg["comparison"] = json!(null);
             msg["targets"] = json!([]);
             msg["selected"] = json!(null);
             msg["commit"] = json!(null);
             msg["generation"] = json!(app.generation());
-            msg["loadError"] = json!("review not loaded");
         }
     }
     msg
@@ -424,6 +426,7 @@ fn diff_changed(app: &Application) -> Value {
             "files": s.files,
             "skipped": s.skipped,
             "sourceError": s.source_error,
+            "listing": s.listing,
             "comparison": s.comparison,
             "targets": s.targets,
             "selected": s.selected,
@@ -435,6 +438,7 @@ fn diff_changed(app: &Application) -> Value {
             "files": [],
             "skipped": [],
             "sourceError": "review not loaded",
+            "listing": ListingState::Unavailable,
             "comparison": null,
             "targets": [],
             "selected": null,

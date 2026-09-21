@@ -109,9 +109,12 @@ only a pluggable diff source for viewing.
 }
 ```
 
-- `source` selects the comparison: `base` (a ref or range against the
-  working tree, `staged` for the index), `commit` (one commit against its
-  parent), or `stack` (PR branches above trunk, `upstream` naming it).
+- `source` selects the comparison: `base` (a ref: this branch from its
+  merge base with that ref against the working tree, so upstream commits
+  never show as deletions; or an `A..B` / `A...B` range with git's
+  meanings; `staged` swaps the working tree for the index), `commit` (one
+  commit against its parent), or `stack` (PR branches above trunk,
+  `upstream` naming it).
 - Anchor levels via nulls: `path: null` is a review-level comment,
   `line: null` a file-level one, otherwise a line or range. Removed lines
   anchor old-side numbers; added and context lines anchor new-side. In a

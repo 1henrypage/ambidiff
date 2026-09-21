@@ -35,6 +35,9 @@ import {
   targetKey,
   targetLabel,
   type ServerMessage,
+  LISTING_STATES,
+  type ListingState,
+  listingPlaceholder,
 } from "./protocol";
 
 const DIR = join(import.meta.dirname, "../../fixtures/contracts");
@@ -169,6 +172,29 @@ describe("server messages", () => {
       const raw = fixture(file);
       const msg: ServerMessage = decodeServerMessage(raw);
       expect(plain(msg), file).toEqual(raw);
+    }
+  });
+
+  test("listing_rejects_unknown_values", () => {
+    const hello = fixture("web-hello.json") as Record<string, unknown>;
+    expect(LISTING_STATES).toEqual((fixture("listing-state.json") as { states: ListingState[] }).states);
+    for (const state of LISTING_STATES) {
+      const msg = decodeServerMessage({ ...hello, listing: state });
+      expect(msg.type === "hello" && msg.listing).toBe(state);
+    }
+    expect(() => decodeServerMessage({ ...hello, listing: "Fresh" })).toThrow(/listing/);
+    expect(() => decodeServerMessage({ ...hello, listing: null })).toThrow(/listing/);
+    const { listing: _dropped, ...withoutListing } = hello;
+    expect(() => decodeServerMessage(withoutListing)).toThrow(/listing/);
+  });
+
+  test("listing_placeholder_matches_the_fixture", () => {
+    const doc = fixture("listing-state.json") as {
+      cases: { listing: ListingState; files: number; placeholder: string | null }[];
+    };
+    expect(doc.cases.length).toBeGreaterThan(0);
+    for (const c of doc.cases) {
+      expect(listingPlaceholder(c.listing, c.files), JSON.stringify(c)).toBe(c.placeholder);
     }
   });
 

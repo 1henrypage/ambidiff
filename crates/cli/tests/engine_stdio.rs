@@ -693,11 +693,29 @@ fn a_source_error_is_distinct_from_an_empty_changed_set() {
         "{init}"
     );
     assert_eq!(init["comparison"], serde_json::Value::Null);
+    assert_eq!(init["listing"], "unavailable", "{init}");
     let files = client.request("files", serde_json::json!({}));
     assert_eq!(files["files"], serde_json::json!([]));
     assert!(files["sourceError"].is_string(), "{files}");
+    assert_eq!(files["listing"], "unavailable", "{files}");
     let err = client.expect_error("view", serde_json::json!({"path": "lib.py"}));
     assert_eq!(err["data"]["kind"], "notInChangedSet", "{err}");
+    client.shutdown();
+}
+
+#[test]
+fn an_empty_changed_set_is_a_fresh_listing() {
+    let (_dir, root) = scratch_repo();
+    // Undo the working-tree edit: HEAD..worktree is genuinely empty.
+    git(&root, &["checkout", "--", "lib.py"]);
+    let mut client = EngineClient::spawn(&root);
+    let init = client.request("initialize", serde_json::json!({}));
+    assert_eq!(init["sourceError"], serde_json::Value::Null, "{init}");
+    assert_eq!(init["listing"], "fresh", "{init}");
+    let files = client.request("files", serde_json::json!({}));
+    assert_eq!(files["files"], serde_json::json!([]));
+    assert_eq!(files["sourceError"], serde_json::Value::Null);
+    assert_eq!(files["listing"], "fresh", "{files}");
     client.shutdown();
 }
 

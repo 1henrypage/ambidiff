@@ -430,6 +430,7 @@ fn hello_carries_every_snapshot_field_of_the_contract() {
     assert_eq!(hello["readOnly"], false);
     assert_eq!(hello["readOnlyReason"], Value::Null);
     assert_eq!(hello["sourceError"], Value::Null);
+    assert_eq!(hello["listing"], "fresh");
     assert_eq!(hello["warnings"], json!([]));
     assert_eq!(hello["skipped"], json!([]));
     assert_eq!(hello["files"][0]["path"], "src/login.ts");
@@ -439,6 +440,74 @@ fn hello_carries_every_snapshot_field_of_the_contract() {
     let review: Value = serde_json::from_str(hello["review"].as_str().expect("review string"))
         .expect("review json");
     assert_eq!(review["review"], "web-test");
+}
+
+#[test]
+fn a_bad_base_is_an_unavailable_listing_over_the_websocket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    write(&root, "src/login.ts", "a\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    write(&root, "src/login.ts", "b\n");
+    cli(
+        &root,
+        &[
+            "init",
+            "--review",
+            "web-test",
+            "--base",
+            "no-such-ref",
+            "--json",
+        ],
+    );
+    let server = Server::spawn(&root);
+    let (_ws, hello) = server.client();
+    assert_eq!(hello["files"], json!([]));
+    assert_eq!(hello["listing"], "unavailable", "{hello}");
+    assert!(
+        hello["sourceError"]
+            .as_str()
+            .is_some_and(|e| e.contains("no-such-ref")),
+        "{hello}"
+    );
+    assert_eq!(hello["comparison"], Value::Null);
+    assert_eq!(
+        hello["readOnly"], false,
+        "a source failure is not read-only"
+    );
+    assert_eq!(hello.get("loadError"), None, "no separate load error key");
+}
+
+#[test]
+fn refresh_after_a_git_failure_keeps_the_previous_listing_marked_stale() {
+    let (_dir, root) = scratch_repo();
+    let server = Server::spawn(&root);
+    let (mut ws, hello) = server.client();
+    assert_eq!(hello["listing"], "fresh");
+    assert_eq!(hello["files"][0]["path"], "src/login.ts");
+
+    // Git itself goes away: every listing attempt fails from here on.
+    let git_dir = root.join(".git");
+    let parked = root.join(".git-parked");
+    std::fs::rename(&git_dir, &parked).expect("park .git");
+    let stale = request(&mut ws, json!({"type": "refresh", "id": 7}));
+    assert_eq!(stale["type"], "snapshot");
+    assert_eq!(stale["listing"], "stale", "{stale}");
+    assert_eq!(
+        stale["files"][0]["path"], "src/login.ts",
+        "the previous listing is kept"
+    );
+    assert!(stale["sourceError"].is_string(), "{stale}");
+
+    std::fs::rename(&parked, &git_dir).expect("restore .git");
+    write(&root, "src/login.ts", "a\nB\nc\nd\nE\n");
+    let fresh = request(&mut ws, json!({"type": "refresh", "id": 8}));
+    assert_eq!(fresh["listing"], "fresh", "{fresh}");
+    assert_eq!(fresh["sourceError"], Value::Null);
+    assert_eq!(fresh["files"][0]["path"], "src/login.ts");
 }
 
 #[test]

@@ -13,6 +13,7 @@
   "unattachedComments": 0,
   "skipped": [],
   "sourceError": null,
+  "listing": "fresh",
   "comparison": {
     "old": {
       "kind": "commit",

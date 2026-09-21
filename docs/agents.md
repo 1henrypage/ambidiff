@@ -166,10 +166,14 @@ See `ambidiff --help` and the README for the full listing.
   directs it to in the moment; `comment.reopen` and
   `comment.resolveAddressed` are human only with no exception.
   `initialize` also reports `readOnlyReason`, `generation`, `sourceError`,
-  `comparison`, `targets`, `selected`, `commit`, and `methods` (a client
-  feature-detects `target.select` there; the protocol version stays 1);
-  `files` adds `skipped`, `sourceError`, `comparison`, `targets`,
-  `selected`, `commit`, `warnings`, `generation`; a `target.select` is
+  `listing`, `comparison`, `targets`, `selected`, `commit`, and `methods`
+  (a client feature-detects `target.select` there; the protocol version
+  stays 1); `files` adds `skipped`, `sourceError`, `listing`,
+  `comparison`, `targets`, `selected`, `commit`, `warnings`, `generation`.
+  `listing` is `fresh`, `stale` (the last listing failed; `files` is the
+  previous listing, kept) or `unavailable` (no listing; `files` is `[]`),
+  so a failed listing is never mistaken for an empty one; a
+  `target.select` is
   followed by exactly one `diffChanged`; `expand` returns `rows` plus
   `at`, `gap`, `view`, `comments`, `generation` (a later `view` already
   contains every expansion). Invalid input (decoding, validation, unknown
@@ -189,8 +193,8 @@ See `ambidiff --help` and the README for the full listing.
   `{selected, targets, comparison, generation}` followed by a `diffChanged`
   broadcast to every tab, the requester included; the selection is shared
   by every tab of one server). Errors are `{type: "error", id, code,
-  message}`. `hello`, `snapshot`, and `diffChanged` carry `targets`,
-  `selected`, and `commit`. Broadcasts `reviewChanged` and `diffChanged`
+  message}`. `hello`, `snapshot`, and `diffChanged` carry `listing`,
+  `targets`, `selected`, and `commit`. Broadcasts `reviewChanged` and `diffChanged`
   carry the new state and `generation`. Messages are limited to 1 MiB
   inbound and 16 MiB outbound; at most 32 connections are served.
 

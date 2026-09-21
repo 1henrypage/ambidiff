@@ -1,0 +1,34 @@
+{
+  "states": [
+    "fresh",
+    "stale",
+    "unavailable"
+  ],
+  "cases": [
+    {
+      "listing": "fresh",
+      "files": 0,
+      "placeholder": "no changes"
+    },
+    {
+      "listing": "fresh",
+      "files": 1,
+      "placeholder": null
+    },
+    {
+      "listing": "stale",
+      "files": 1,
+      "placeholder": "showing previous listing"
+    },
+    {
+      "listing": "stale",
+      "files": 0,
+      "placeholder": "showing previous listing"
+    },
+    {
+      "listing": "unavailable",
+      "files": 0,
+      "placeholder": "source unavailable"
+    }
+  ]
+}

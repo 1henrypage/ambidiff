@@ -220,6 +220,38 @@ pub struct Listing {
     pub skipped: Vec<SkippedPath>,
 }
 
+/// How a snapshot's file listing relates to its source right now, so a
+/// failed listing is never mistaken for a successful empty one. Carried
+/// on every snapshot-like wire message as `listing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListingState {
+    /// The files are the source's listing as of this load.
+    Fresh,
+    /// The last listing attempt failed; the files are the previous
+    /// successful listing, kept so the reviewer's place survives a
+    /// transient failure.
+    Stale,
+    /// No listing could be produced: the source never opened, or failed
+    /// before any listing succeeded. There are no files to show.
+    Unavailable,
+}
+
+impl ListingState {
+    /// Tree placeholder when the listing needs explaining; `None` when the
+    /// files speak for themselves. `file_count` is the whole listing, never
+    /// a filtered view of it (a filter that hides every file is not "no
+    /// changes").
+    pub fn placeholder(self, file_count: usize) -> Option<&'static str> {
+        match self {
+            ListingState::Fresh if file_count == 0 => Some("no changes"),
+            ListingState::Fresh => None,
+            ListingState::Stale => Some("showing previous listing"),
+            ListingState::Unavailable => Some("source unavailable"),
+        }
+    }
+}
+
 /// Errors from a diff source.
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
@@ -359,6 +391,38 @@ mod tests {
             new: Endpoint::Index,
         };
         assert_eq!(unborn.to_string(), "empty..index");
+    }
+
+    #[test]
+    fn listing_state_placeholder_explains_everything_but_a_fresh_listing_with_files() {
+        assert_eq!(ListingState::Fresh.placeholder(0), Some("no changes"));
+        assert_eq!(ListingState::Fresh.placeholder(3), None);
+        assert_eq!(
+            ListingState::Stale.placeholder(3),
+            Some("showing previous listing")
+        );
+        assert_eq!(
+            ListingState::Stale.placeholder(0),
+            Some("showing previous listing")
+        );
+        assert_eq!(
+            ListingState::Unavailable.placeholder(0),
+            Some("source unavailable")
+        );
+    }
+
+    #[test]
+    fn listing_state_serialises_lowercase() {
+        for (state, text) in [
+            (ListingState::Fresh, "\"fresh\""),
+            (ListingState::Stale, "\"stale\""),
+            (ListingState::Unavailable, "\"unavailable\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect("json"), text);
+            let back: ListingState = serde_json::from_str(text).expect("parse");
+            assert_eq!(back, state);
+        }
+        assert!(serde_json::from_str::<ListingState>("\"Fresh\"").is_err());
     }
 
     #[test]

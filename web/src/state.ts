@@ -28,7 +28,7 @@ import {
   DEFAULT_VIEW_OPTIONS,
   sameTarget,
   targetKey,
-  targetLabel,
+  targetLabel, type ListingState,
 } from "./protocol";
 import { type CommentRecord, type DisplayLine, type Pane, buildDisplay, lineKey } from "./paint";
 import { type RequestBody, type TransportApi, TransportError } from "./transport";
@@ -49,6 +49,8 @@ export type Nav = { kind: "overview" } | { kind: "file"; path: string };
 export interface Diagnostics {
   reviewError: string | null;
   sourceError: string | null;
+  /** Whether `files` is this load's listing, a kept previous one, or nothing. */
+  listing: ListingState;
   skipped: SkippedPath[];
   warnings: string[];
   readOnly: boolean;
@@ -124,6 +126,7 @@ export class Store {
   diagnostics: Diagnostics = {
     reviewError: null,
     sourceError: null,
+    listing: "fresh",
     skipped: [],
     warnings: [],
     readOnly: false,
@@ -137,6 +140,11 @@ export class Store {
   connectionState: import("./transport").ConnectionState = "disconnected";
 
   private booted = false;
+
+  /** True once the first snapshot has been applied. */
+  get isBooted(): boolean {
+    return this.booted;
+  }
   private token = "";
   private listeners = new Set<() => void>();
 
@@ -235,6 +243,7 @@ export class Store {
       review: string;
       files: FileEntry[];
       sourceError: string | null;
+      listing: ListingState;
       skipped: SkippedPath[];
       warnings: string[];
       readOnly: boolean;
@@ -254,6 +263,7 @@ export class Store {
     this.applyStack(fields);
     this.listedSelection = fields.selected;
     this.diagnostics.sourceError = fields.sourceError;
+    this.diagnostics.listing = fields.listing;
     this.diagnostics.skipped = fields.skipped;
     this.diagnostics.warnings = fields.warnings;
     this.diagnostics.readOnly = fields.readOnly;
@@ -419,6 +429,7 @@ export class Store {
       files: FileEntry[];
       skipped: SkippedPath[];
       sourceError: string | null;
+      listing: ListingState;
     } & StackFields,
   ): void {
     this.files = msg.files;
@@ -427,6 +438,7 @@ export class Store {
     this.applyStack(msg);
     this.listedSelection = msg.selected;
     this.diagnostics.sourceError = msg.sourceError;
+    this.diagnostics.listing = msg.listing;
     this.diagnostics.skipped = msg.skipped;
     this.reproject();
     this.reconcileNav();

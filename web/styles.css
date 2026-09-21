@@ -58,6 +58,11 @@ body {
 .tree-row .todo { color: var(--open); }
 .tree-row .done { color: var(--resolved); }
 .tree-row .fstatus { color: var(--addressed); margin-right: 4px; }
+/* The listing's explanation ("no changes", "source unavailable", "showing
+   previous listing"): a row that is not a file, so it neither hovers nor
+   clicks. */
+.tree-row.placeholder { color: var(--dim); font-style: italic; cursor: default; }
+.tree-row.placeholder:hover { background: transparent; }
 #diffwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #banner {
   background: var(--banner-bg); padding: 4px 12px; flex-shrink: 0;
@@ -124,6 +129,7 @@ body {
   display: flex; gap: 14px; color: var(--dim); white-space: nowrap; overflow: hidden;
 }
 #statusbar .msg { color: var(--warn); }
+#statusbar .badge { color: var(--warn); font-weight: 600; }
 #overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.45);
   display: flex; align-items: center; justify-content: center;

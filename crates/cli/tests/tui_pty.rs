@@ -862,6 +862,36 @@ fn source_change_reconfigures_listing() {
     wait_for_exit(&mut session);
 }
 
+#[test]
+fn initial_source_failure_is_not_an_empty_review() {
+    let (_dir, root) = scratch_repo();
+    rewrite_review(&root, |v| {
+        v["source"]["base"] = serde_json::json!("no-such-ref")
+    });
+    let mut session = spawn_tui(&root);
+    wait_for_all(
+        &mut session,
+        &[
+            "source unavailable",
+            "[source error]",
+            "no-such-ref",
+            "press r to retry",
+        ],
+        "a broken source is diagnosed in the tree, the status bar and the overview, with a way out",
+    );
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
+#[test]
+fn clean_tree_shows_no_changes() {
+    let (_dir, root) = repo_with(&[("src/app.ts", "const one = 1;\n")]);
+    let mut session = spawn_tui(&root);
+    wait_for(&mut session, "no changes", "a clean tree is explained");
+    send(&mut session, "q");
+    wait_for_exit(&mut session);
+}
+
 /// Add a review-level comment via the real CLI, returning its id.
 fn cli_add_comment(root: &Path, body: &str) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_ambidiff"))
