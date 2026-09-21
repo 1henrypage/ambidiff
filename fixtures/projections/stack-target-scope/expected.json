@@ -1,0 +1,39 @@
+{
+  "placements": [
+    { "kind": "file", "path": "src/a.rs" },
+    { "kind": "file", "path": "src/a.rs" },
+    { "kind": "otherTarget" },
+    { "kind": "wasOn", "target": { "kind": "branch", "name": "auth-0" } },
+    { "kind": "review" },
+    { "kind": "otherTarget" },
+    { "kind": "unattached" },
+    { "kind": "file", "path": "src/new.rs", "wasPath": "src/old.rs" },
+    { "kind": "wasOn", "target": { "kind": "branch", "name": "auth-9" } }
+  ],
+  "fileCommentsSrcA": [
+    { "index": 0, "commentId": "c-legacy", "wasPath": null },
+    { "index": 1, "commentId": "c-selected", "wasPath": null }
+  ],
+  "fileCommentsSrcNew": [
+    { "index": 7, "commentId": "c-renamed", "wasPath": "src/old.rs" }
+  ],
+  "overview": [
+    { "commentId": "c-review-target", "unattached": false, "wasOn": null },
+    { "commentId": "c-gone", "unattached": true, "wasOn": "auth-0" },
+    { "commentId": "c-unattached-target", "unattached": true, "wasOn": null },
+    { "commentId": "c-gone-review", "unattached": true, "wasOn": "auth-9" }
+  ],
+  "countsSrcA": { "todo": 2, "total": 2 },
+  "countsSrcNew": { "todo": 1, "total": 1 },
+  "reviewOnly": { "todo": 0, "total": 1 },
+  "unattached": { "todo": 2, "total": 3 },
+  "reviewLevel": { "todo": 2, "total": 4 },
+  "wasOn": { "todo": 2, "total": 2 },
+  "untargeted": { "todo": 1, "total": 1 },
+  "targetCounts": [
+    { "id": { "kind": "branch", "name": "auth-1" }, "counts": { "todo": 2, "total": 2 } },
+    { "id": { "kind": "branch", "name": "auth-2" }, "counts": { "todo": 2, "total": 4 } },
+    { "id": { "kind": "stack" }, "counts": { "todo": 0, "total": 0 } }
+  ],
+  "unscopedCountsSrcA": { "todo": 4, "total": 4 }
+}

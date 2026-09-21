@@ -1,0 +1,25 @@
+{
+  "files": [
+    { "path": "src/a.rs", "status": "modified" },
+    { "path": "src/new.rs", "oldPath": "src/old.rs", "status": "renamed" }
+  ],
+  "scope": {
+    "selected": { "kind": "branch", "name": "auth-2" },
+    "live": [
+      { "kind": "branch", "name": "auth-1" },
+      { "kind": "branch", "name": "auth-2" },
+      { "kind": "stack" }
+    ]
+  },
+  "comments": [
+    { "id": "c-legacy", "path": "src/a.rs", "status": "open" },
+    { "id": "c-selected", "path": "src/a.rs", "status": "open", "target": { "kind": "branch", "name": "auth-2" } },
+    { "id": "c-other", "path": "src/a.rs", "status": "open", "target": { "kind": "branch", "name": "auth-1" } },
+    { "id": "c-gone", "path": "src/a.rs", "status": "reopened", "target": { "kind": "branch", "name": "auth-0" } },
+    { "id": "c-review-target", "path": null, "status": "addressed", "target": { "kind": "branch", "name": "auth-2" } },
+    { "id": "c-review-other", "path": null, "status": "open", "target": { "kind": "branch", "name": "auth-1" } },
+    { "id": "c-unattached-target", "path": "src/deleted.rs", "status": "resolved", "target": { "kind": "branch", "name": "auth-2" } },
+    { "id": "c-renamed", "path": "src/old.rs", "status": "open", "target": { "kind": "branch", "name": "auth-2" } },
+    { "id": "c-gone-review", "path": null, "status": "open", "target": { "kind": "branch", "name": "auth-9" } }
+  ]
+}

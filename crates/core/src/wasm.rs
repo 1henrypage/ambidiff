@@ -18,11 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 
-use crate::anchor::ActiveCell;
+use crate::anchor::{ActiveCell, TargetScope};
 use crate::model::{FileDiff, FileDiffKind, FileEntry, FileStatus};
 use crate::parser::parse_file_diff;
 use crate::projection::{FileFilter, ReviewProjection};
 use crate::review::{ReviewFile, Source, Status, parse_review};
+use crate::stack::TargetId;
 use crate::view::ViewOptions;
 use crate::view_state::ViewState;
 
@@ -34,6 +35,20 @@ struct WasmState {
     /// against.
     generation: u64,
     views: BTreeMap<String, ViewState>,
+    /// The stack's live targets and the selected one ([`ad_set_targets`]);
+    /// empty and `None` outside stack reviews, which is the unscoped
+    /// projection.
+    targets: Vec<TargetId>,
+    selected: Option<TargetId>,
+}
+
+impl WasmState {
+    fn scope(&self) -> TargetScope {
+        TargetScope {
+            selected: self.selected.clone(),
+            live: self.targets.clone(),
+        }
+    }
 }
 
 thread_local! {
@@ -43,8 +58,31 @@ thread_local! {
             files: Vec::new(),
             generation: 0,
             views: BTreeMap::new(),
+            targets: Vec::new(),
+            selected: None,
         })
     };
+}
+
+/// Build the projection every export derives from (the stored review or an
+/// empty one, the stored listing, the stored target scope) and hand it to
+/// `f`. One builder, so the tree, a file's comments, the overview, and an
+/// expansion can never disagree about scope.
+fn with_projection<T>(
+    s: &WasmState,
+    filter: FileFilter,
+    f: impl FnOnce(&ReviewProjection<'_>) -> T,
+) -> T {
+    let placeholder;
+    let review: &ReviewFile = match &s.review {
+        Some(r) => r,
+        None => {
+            placeholder = empty_review();
+            &placeholder
+        }
+    };
+    let projection = ReviewProjection::scoped(review, &s.files, filter, s.scope());
+    f(&projection)
 }
 
 fn err_json(msg: impl std::fmt::Display) -> String {
@@ -129,6 +167,32 @@ pub fn ad_set_files(files_json: &str) -> String {
     }
 }
 
+/// Store the stack's live targets and the selected one:
+/// `{"targets": [TargetId...], "selected": TargetId | null}`. Every later
+/// projection (tree, file comments, overview, expand) is scoped to it.
+/// Outside a stack review pass `{"targets": [], "selected": null}`.
+#[wasm_bindgen]
+pub fn ad_set_targets(targets_json: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        #[serde(default)]
+        targets: Vec<TargetId>,
+        #[serde(default)]
+        selected: Option<TargetId>,
+    }
+    match serde_json::from_str::<Wire>(targets_json) {
+        Ok(wire) => {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                s.targets = wire.targets;
+                s.selected = wire.selected;
+            });
+            "{}".to_string()
+        }
+        Err(e) => err_json(e),
+    }
+}
+
 /// The file tree (flattened rows) for the stored listing, with per-file
 /// comment tallies. `collapsed_json` is a JSON array of collapsed dir paths.
 /// Unfiltered (compat): always projects with [`FileFilter::All`].
@@ -137,33 +201,26 @@ pub fn ad_tree(collapsed_json: &str) -> String {
     let collapsed: BTreeSet<String> = serde_json::from_str(collapsed_json).unwrap_or_default();
     STATE.with(|s| {
         let s = s.borrow();
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, FileFilter::All);
-        let snapshot = projection.snapshot(&collapsed);
-        let rows_json: Vec<Value> = snapshot
-            .tree
-            .iter()
-            .map(|row| {
-                let mut v = serde_json::to_value(row).unwrap_or_default();
-                if let Some(fi) = row.file_index {
-                    v["entry"] = serde_json::to_value(&s.files[fi]).unwrap_or_default();
-                }
-                v
+        with_projection(&s, FileFilter::All, |projection| {
+            let snapshot = projection.snapshot(&collapsed);
+            let rows_json: Vec<Value> = snapshot
+                .tree
+                .iter()
+                .map(|row| {
+                    let mut v = serde_json::to_value(row).unwrap_or_default();
+                    if let Some(fi) = row.file_index {
+                        v["entry"] = serde_json::to_value(&s.files[fi]).unwrap_or_default();
+                    }
+                    v
+                })
+                .collect();
+            serde_json::json!({
+                "rows": rows_json,
+                "reviewLevelComments": snapshot.review_level_comments,
+                "unattachedComments": snapshot.unattached_comments,
             })
-            .collect();
-        serde_json::json!({
-            "rows": rows_json,
-            "reviewLevelComments": snapshot.review_level_comments,
-            "unattachedComments": snapshot.unattached_comments,
+            .to_string()
         })
-        .to_string()
     })
 }
 
@@ -259,39 +316,32 @@ pub fn ad_file_comments(path: &str) -> String {
         let Some(state) = s.views.get(path) else {
             return err_json(format!("{path:?} not loaded"));
         };
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, FileFilter::All);
-        ok_json(&state.file_projection(&projection).comments)
+        with_projection(&s, FileFilter::All, |projection| {
+            ok_json(&state.file_projection(projection).comments)
+        })
     })
 }
 
-/// Review-level and unattached comments (for the overview pane).
+/// Review-level and unattached comments (for the overview pane); `wasOn`
+/// names the target a comment was made on when that target left the stack.
 #[wasm_bindgen]
 pub fn ad_overview_comments() -> String {
     STATE.with(|s| {
         let s = s.borrow();
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, FileFilter::All);
-        let records: Vec<Value> = projection
-            .overview()
-            .iter()
-            .map(|o| serde_json::json!({ "comment": o.comment, "unattached": o.unattached }))
-            .collect();
-        ok_json(&records)
+        with_projection(&s, FileFilter::All, |projection| {
+            let records: Vec<Value> = projection
+                .overview()
+                .iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "comment": o.comment,
+                        "unattached": o.unattached,
+                        "wasOn": o.was_on,
+                    })
+                })
+                .collect();
+            ok_json(&records)
+        })
     })
 }
 
@@ -336,23 +386,17 @@ pub fn ad_expand(path: &str, gap_id: &str, content: &str) -> String {
             Ok(e) => e,
             Err(e) => return err_json(e),
         };
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, FileFilter::All);
-        let state = s.views.get(path).expect("just expanded");
-        let fp = state.file_projection(&projection);
-        serde_json::json!({
-            "expansion": expansion,
-            "view": fp.view,
-            "comments": fp.comments,
+        let s = &*s;
+        with_projection(s, FileFilter::All, |projection| {
+            let state = s.views.get(path).expect("just expanded");
+            let fp = state.file_projection(projection);
+            serde_json::json!({
+                "expansion": expansion,
+                "view": fp.view,
+                "comments": fp.comments,
+            })
+            .to_string()
         })
-        .to_string()
     })
 }
 
@@ -371,16 +415,9 @@ pub fn ad_projection(opts_json: &str) -> String {
         .unwrap_or_default();
     STATE.with(|s| {
         let s = s.borrow();
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, filter);
-        ok_json(&projection.snapshot(&collapsed))
+        with_projection(&s, filter, |projection| {
+            ok_json(&projection.snapshot(&collapsed))
+        })
     })
 }
 
@@ -392,16 +429,9 @@ pub fn ad_file_projection(path: &str) -> String {
         let Some(state) = s.views.get(path) else {
             return err_json(format!("{path:?} not loaded"));
         };
-        let placeholder;
-        let review: &ReviewFile = match &s.review {
-            Some(r) => r,
-            None => {
-                placeholder = empty_review();
-                &placeholder
-            }
-        };
-        let projection = ReviewProjection::new(review, &s.files, FileFilter::All);
-        ok_json(&state.file_projection(&projection))
+        with_projection(&s, FileFilter::All, |projection| {
+            ok_json(&state.file_projection(projection))
+        })
     })
 }
 
@@ -500,7 +530,65 @@ mod wasm_tests {
 
     fn seed() -> u64 {
         v(ad_set_review(REVIEW));
+        v(ad_set_targets(r#"{"targets": [], "selected": null}"#));
         v(ad_set_files(FILES))["generation"].as_u64().expect("gen")
+    }
+
+    const STACK_REVIEW: &str = r#"{"ambidiff":1,"review":"w","revision":1,"source":{"kind":"git","stack":{}},
+        "createdAt":"t","updatedAt":"t","comments":[
+          {"id":"c-1","rev":1,"status":"open","path":"src/a.rs","side":"new","line":2,
+           "target":{"kind":"branch","name":"auth-2"},"body":"mine","author":"h","createdAt":"t","updatedAt":"t"},
+          {"id":"c-2","rev":1,"status":"open","path":"src/a.rs","side":"new","line":2,
+           "target":{"kind":"branch","name":"auth-1"},"body":"other pr","author":"h","createdAt":"t","updatedAt":"t"},
+          {"id":"c-3","rev":1,"status":"open","path":"src/a.rs","side":"new","line":2,
+           "target":{"kind":"branch","name":"auth-0"},"body":"merged away","author":"h","createdAt":"t","updatedAt":"t"},
+          {"id":"c-4","rev":1,"status":"open","path":"src/a.rs","side":"new","line":2,
+           "body":"legacy","author":"h","createdAt":"t","updatedAt":"t"}]}"#;
+
+    #[wasm_bindgen_test]
+    fn set_targets_scopes_file_comments_overview_and_counts() {
+        v(ad_set_review(STACK_REVIEW));
+        v(ad_set_files(FILES));
+        v(ad_set_targets(
+            r#"{"targets": [{"kind":"branch","name":"auth-1"},{"kind":"branch","name":"auth-2"},{"kind":"stack"}],
+                "selected": {"kind":"branch","name":"auth-2"}}"#,
+        ));
+        v(ad_load_file("src/a.rs", RAW, OPTS));
+        let ids: Vec<String> = v(ad_file_comments("src/a.rs"))
+            .as_array()
+            .expect("comments")
+            .iter()
+            .map(|c| c["comment"]["id"].as_str().expect("id").to_string())
+            .collect();
+        assert_eq!(ids, vec!["c-1", "c-4"], "own target and legacy only");
+        let overview = v(ad_overview_comments());
+        assert_eq!(overview.as_array().expect("overview").len(), 1);
+        assert_eq!(overview[0]["comment"]["id"], "c-3");
+        assert_eq!(overview[0]["unattached"], true);
+        assert_eq!(overview[0]["wasOn"], "auth-0");
+        let projection = v(ad_projection(r#"{"filter":"all","collapsed":[]}"#));
+        assert_eq!(projection["counts"]["src/a.rs"]["total"], 2);
+        assert_eq!(projection["selected"]["name"], "auth-2");
+        assert_eq!(projection["targetCounts"][0]["counts"]["total"], 1);
+        assert_eq!(projection["targetCounts"][1]["counts"]["total"], 1);
+        assert_eq!(projection["wasOnComments"], 1);
+        assert_eq!(projection["untargetedComments"], 1);
+
+        // Selecting the other PR flips which comment is visible.
+        v(ad_set_targets(
+            r#"{"targets": [{"kind":"branch","name":"auth-1"},{"kind":"branch","name":"auth-2"},{"kind":"stack"}],
+                "selected": {"kind":"branch","name":"auth-1"}}"#,
+        ));
+        let ids: Vec<String> = v(ad_file_comments("src/a.rs"))
+            .as_array()
+            .expect("comments")
+            .iter()
+            .map(|c| c["comment"]["id"].as_str().expect("id").to_string())
+            .collect();
+        assert_eq!(ids, vec!["c-2", "c-4"]);
+        let bad = ad_set_targets(r#"{"targets": ["auth-1"]}"#);
+        assert!(bad.contains("error"), "{bad}");
+        seed();
     }
 
     #[wasm_bindgen_test]

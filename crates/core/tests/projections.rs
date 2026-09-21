@@ -7,11 +7,13 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
+use ambidiff_core::anchor::TargetScope;
 use ambidiff_core::model::{FileDiff, FileDiffKind, FileEntry, FileStatus};
 use ambidiff_core::parser::parse_file_diff;
 use ambidiff_core::projection::{FileFilter, ReviewProjection};
 use ambidiff_core::review::{Comment, ReviewFile, Side, Source, Status};
 use ambidiff_core::rows::{Row, ViewMode};
+use ambidiff_core::stack::TargetId;
 use ambidiff_core::view::ViewOptions;
 use ambidiff_core::view_state::ViewState;
 
@@ -44,6 +46,10 @@ fn read_json(case: &str, name: &str) -> Value {
 
 fn comment_from(v: &Value) -> Comment {
     let status: Status = serde_json::from_value(v["status"].clone()).expect("status");
+    let target: Option<TargetId> = v
+        .get("target")
+        .filter(|t| !t.is_null())
+        .map(|t| serde_json::from_value(t.clone()).expect("target"));
     Comment {
         id: v["id"].as_str().expect("id").to_string(),
         rev: 1,
@@ -52,7 +58,7 @@ fn comment_from(v: &Value) -> Comment {
         side: None,
         line: None,
         end_line: None,
-        target: None,
+        target,
         snippet: None,
         body: "b".to_string(),
         response: None,
@@ -142,6 +148,69 @@ fn rename_unattached() {
         .map(|o| json!({"commentId": o.comment.id, "unattached": o.unattached}))
         .collect();
     assert_eq!(Value::Array(overview_json), expected["overview"]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn stack_target_scope() {
+    let input = read_json("stack-target-scope", "input.json");
+    let expected = read_json("stack-target-scope", "expected.json");
+    let files = files_from(&input["files"]);
+    let comments = input["comments"].as_array().expect("comments").clone();
+    let review = review_from(&comments);
+    let scope = TargetScope {
+        selected: serde_json::from_value(input["scope"]["selected"].clone()).expect("selected"),
+        live: serde_json::from_value(input["scope"]["live"].clone()).expect("live"),
+    };
+    let projection = ReviewProjection::scoped(&review, &files, FileFilter::All, scope);
+
+    assert_eq!(
+        serde_json::to_value(projection.placements()).expect("json"),
+        expected["placements"]
+    );
+    for (path, key) in [
+        ("src/a.rs", "fileCommentsSrcA"),
+        ("src/new.rs", "fileCommentsSrcNew"),
+    ] {
+        let placed: Vec<Value> = projection
+            .file_comments(path)
+            .iter()
+            .map(|p| json!({"index": p.index, "commentId": p.comment.id, "wasPath": p.was_path}))
+            .collect();
+        assert_eq!(Value::Array(placed), expected[key], "{key}");
+    }
+    let overview: Vec<Value> = projection
+        .overview()
+        .iter()
+        .map(|o| json!({"commentId": o.comment.id, "unattached": o.unattached, "wasOn": o.was_on}))
+        .collect();
+    assert_eq!(Value::Array(overview), expected["overview"]);
+
+    let counts = |c: ambidiff_core::projection::FileCounts| serde_json::to_value(c).expect("json");
+    assert_eq!(
+        counts(projection.counts_for("src/a.rs")),
+        expected["countsSrcA"]
+    );
+    assert_eq!(
+        counts(projection.counts_for("src/new.rs")),
+        expected["countsSrcNew"]
+    );
+    assert_eq!(counts(projection.review_only()), expected["reviewOnly"]);
+    assert_eq!(counts(projection.unattached()), expected["unattached"]);
+    assert_eq!(counts(projection.review_level()), expected["reviewLevel"]);
+    assert_eq!(counts(projection.was_on()), expected["wasOn"]);
+    assert_eq!(counts(projection.untargeted()), expected["untargeted"]);
+    assert_eq!(
+        serde_json::to_value(projection.target_counts()).expect("json"),
+        expected["targetCounts"]
+    );
+
+    // The same review without a selection places every comment by path.
+    let unscoped = ReviewProjection::new(&review, &files, FileFilter::All);
+    assert_eq!(
+        counts(unscoped.counts_for("src/a.rs")),
+        expected["unscopedCountsSrcA"]
+    );
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

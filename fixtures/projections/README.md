@@ -26,6 +26,14 @@ Each case directory holds:
   its `wasPath` badge in `file_comments`; a comment on a file that vanished
   beyond git's rename detection surfaces in `overview()` as unattached,
   after the review-level comments (never silently dropped).
+- `stack-target-scope` -- `ReviewProjection::scoped` from PR `auth-2` of a
+  stack whose live targets are `auth-1`, `auth-2`, `stack`: a comment
+  without a target (legacy) and a comment on the selected target place by
+  path; a comment on another live target is `otherTarget` and counts
+  nowhere; a comment on a branch that left the stack is `wasOn` and joins
+  the unattached group (and the overview, with its badge) from every
+  target; `targetCounts` tallies each live target's own comments wherever
+  they place; the placement vector stays parallel to the comments.
 - `placeholder-kinds` -- `FileView::assemble` over `FileDiff::placeholder`
   for both `Binary` and `TooLarge`: each wire count appears exactly once,
   `rows` stays empty, and `desc` only exists for binary (B16).

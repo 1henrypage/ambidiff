@@ -9,15 +9,22 @@
 //! counts once in [`ReviewProjection::new`]; every other accessor reads from
 //! that, so a filtered tree, a file's comment list, and the review-level
 //! overview can never disagree about what the review currently says.
+//!
+//! In a stack review the projection is scoped to the selected target
+//! ([`ReviewProjection::scoped`]): comments made on another live target
+//! count nowhere here, comments whose target left the stack join the
+//! unattached group with a "was on" badge, and per-target tallies for the
+//! strip come from the same pass.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::anchor::{Placement, place_comments};
+use crate::anchor::{Placement, TargetScope, place_comments_scoped};
 use crate::model::FileEntry;
 use crate::review::{Comment, ReviewFile};
+use crate::stack::TargetId;
 use crate::tree::{TreeRow, build_filtered_file_tree, flatten_tree};
 
 /// Which files the tree shows. Cycles All -> Annotated -> Unreviewed -> All.
@@ -87,6 +94,9 @@ pub struct OverviewComment<'a> {
     pub index: usize,
     pub comment: &'a Comment,
     pub unattached: bool,
+    /// The label of the target this comment was made on when that target
+    /// has left the stack (the "was on" badge).
+    pub was_on: Option<&'a str>,
 }
 
 /// An owned copy of [`OverviewComment`], for the wire ([`ProjectionSnapshot`]
@@ -98,6 +108,16 @@ pub struct OverviewCommentOwned {
     pub index: usize,
     pub comment: Comment,
     pub unattached: bool,
+    pub was_on: Option<String>,
+}
+
+/// Tally of the comments made on one live target (its own comments only,
+/// wherever they place), for the target strip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCounts {
+    pub id: TargetId,
+    pub counts: FileCounts,
 }
 
 /// Everything one frontend needs to paint the file list at once: filter,
@@ -112,6 +132,10 @@ pub struct ProjectionSnapshot {
     pub review_level_comments: usize,
     pub unattached_comments: usize,
     pub overview: Vec<OverviewCommentOwned>,
+    pub selected: Option<TargetId>,
+    pub target_counts: Vec<TargetCounts>,
+    pub untargeted_comments: usize,
+    pub was_on_comments: usize,
 }
 
 /// The review projected against the current changed-file list: placements
@@ -120,41 +144,109 @@ pub struct ReviewProjection<'a> {
     review: &'a ReviewFile,
     files: &'a [FileEntry],
     filter: FileFilter,
+    scope: TargetScope,
     placements: Vec<Placement>,
     counts: BTreeMap<String, FileCounts>,
     review_only: FileCounts,
     unattached_only: FileCounts,
+    was_on: FileCounts,
+    untargeted: FileCounts,
+    target_counts: Vec<TargetCounts>,
 }
 
 impl<'a> ReviewProjection<'a> {
+    /// The unscoped projection: every comment placed by path (non-stack
+    /// reviews, and callers that have no selection).
     pub fn new(review: &'a ReviewFile, files: &'a [FileEntry], filter: FileFilter) -> Self {
-        let placements = place_comments(&review.comments, files);
+        ReviewProjection::scoped(review, files, filter, TargetScope::default())
+    }
+
+    /// The projection as seen from `scope.selected`: placements follow
+    /// [`place_comments_scoped`], `OtherTarget` comments count nowhere,
+    /// `WasOn` comments count as unattached (and in `was_on`), and every
+    /// live target gets its own tally.
+    pub fn scoped(
+        review: &'a ReviewFile,
+        files: &'a [FileEntry],
+        filter: FileFilter,
+        scope: TargetScope,
+    ) -> Self {
+        let placements = place_comments_scoped(&review.comments, files, &scope);
         let mut counts: BTreeMap<String, FileCounts> = BTreeMap::new();
         let mut review_only = FileCounts::default();
         let mut unattached_only = FileCounts::default();
+        let mut was_on = FileCounts::default();
+        let mut untargeted = FileCounts::default();
+        let mut target_counts: Vec<TargetCounts> = scope
+            .live
+            .iter()
+            .map(|id| TargetCounts {
+                id: id.clone(),
+                counts: FileCounts::default(),
+            })
+            .collect();
         for (comment, placement) in review.comments.iter().zip(&placements) {
             let is_todo = comment.status.is_todo();
+            match &comment.target {
+                None => untargeted.add(is_todo),
+                Some(target) => {
+                    if let Some(tally) = target_counts.iter_mut().find(|t| &t.id == target) {
+                        tally.counts.add(is_todo);
+                    }
+                }
+            }
             match placement {
                 Placement::File { path, .. } => {
                     counts.entry(path.clone()).or_default().add(is_todo)
                 }
                 Placement::Review => review_only.add(is_todo),
                 Placement::Unattached => unattached_only.add(is_todo),
+                Placement::WasOn { .. } => {
+                    unattached_only.add(is_todo);
+                    was_on.add(is_todo);
+                }
+                Placement::OtherTarget => {}
             }
         }
         ReviewProjection {
             review,
             files,
             filter,
+            scope,
             placements,
             counts,
             review_only,
             unattached_only,
+            was_on,
+            untargeted,
+            target_counts,
         }
     }
 
     pub fn filter(&self) -> FileFilter {
         self.filter
+    }
+
+    /// The target this projection is scoped to (`None` outside stacks).
+    pub fn selected(&self) -> Option<&TargetId> {
+        self.scope.selected.as_ref()
+    }
+
+    /// Comments whose target has left the stack (a subset of `unattached`).
+    pub fn was_on(&self) -> FileCounts {
+        self.was_on
+    }
+
+    /// Comments without a target (legacy, or a non-stack review): they show
+    /// on every target.
+    pub fn untargeted(&self) -> FileCounts {
+        self.untargeted
+    }
+
+    /// One tally per live target, in stack order, counting the comments
+    /// made on that target wherever they place.
+    pub fn target_counts(&self) -> &[TargetCounts] {
+        &self.target_counts
     }
 
     pub fn files(&self) -> &'a [FileEntry] {
@@ -257,7 +349,9 @@ impl<'a> ReviewProjection<'a> {
         rows
     }
 
-    /// Review-level comments first, then unattached, each in comment order.
+    /// Review-level comments first, then the unattached group (files gone
+    /// from the diff, and comments whose target left the stack), each in
+    /// comment order.
     pub fn overview(&self) -> Vec<OverviewComment<'a>> {
         let mut out = Vec::new();
         for (index, (comment, placement)) in self
@@ -272,6 +366,7 @@ impl<'a> ReviewProjection<'a> {
                     index,
                     comment,
                     unattached: false,
+                    was_on: None,
                 });
             }
         }
@@ -282,12 +377,22 @@ impl<'a> ReviewProjection<'a> {
             .zip(&self.placements)
             .enumerate()
         {
-            if matches!(placement, Placement::Unattached) {
-                out.push(OverviewComment {
+            match placement {
+                Placement::Unattached => out.push(OverviewComment {
                     index,
                     comment,
                     unattached: true,
-                });
+                    was_on: None,
+                }),
+                Placement::WasOn { .. } => out.push(OverviewComment {
+                    index,
+                    comment,
+                    unattached: true,
+                    // The badge text is the comment's own recorded target,
+                    // which the review owns (lifetime `'a`).
+                    was_on: comment.target.as_ref().map(TargetId::label),
+                }),
+                _ => {}
             }
         }
         out
@@ -309,8 +414,13 @@ impl<'a> ReviewProjection<'a> {
                     index: o.index,
                     comment: o.comment.clone(),
                     unattached: o.unattached,
+                    was_on: o.was_on.map(str::to_string),
                 })
                 .collect(),
+            selected: self.scope.selected.clone(),
+            target_counts: self.target_counts.clone(),
+            untargeted_comments: self.untargeted.total,
+            was_on_comments: self.was_on.total,
         }
     }
 }
@@ -449,6 +559,159 @@ mod tests {
         assert!(!overview[0].unattached);
         assert_eq!(overview[1].comment.id, "c-unattached");
         assert!(overview[1].unattached);
+    }
+
+    fn tagged(id: &str, path: Option<&str>, status: Status, target: Option<TargetId>) -> Comment {
+        let mut c = comment(id, path, status);
+        c.target = target;
+        c
+    }
+
+    fn branch(name: &str) -> TargetId {
+        TargetId::Branch { name: name.into() }
+    }
+
+    fn scope() -> TargetScope {
+        TargetScope {
+            selected: Some(branch("auth-2")),
+            live: vec![branch("auth-1"), branch("auth-2"), TargetId::Stack],
+        }
+    }
+
+    fn stack_review() -> ReviewFile {
+        review_with(vec![
+            tagged("c-legacy", Some("a.rs"), Status::Open, None),
+            tagged(
+                "c-selected",
+                Some("a.rs"),
+                Status::Open,
+                Some(branch("auth-2")),
+            ),
+            tagged(
+                "c-other",
+                Some("a.rs"),
+                Status::Open,
+                Some(branch("auth-1")),
+            ),
+            tagged(
+                "c-gone",
+                Some("a.rs"),
+                Status::Reopened,
+                Some(branch("auth-0")),
+            ),
+            tagged("c-review", None, Status::Addressed, Some(branch("auth-2"))),
+            tagged(
+                "c-review-gone",
+                None,
+                Status::Open,
+                Some(TargetId::Worktree),
+            ),
+            tagged(
+                "c-unattached",
+                Some("gone.rs"),
+                Status::Resolved,
+                Some(branch("auth-2")),
+            ),
+        ])
+    }
+
+    #[test]
+    fn scoped_counts_hide_other_targets_and_bucket_was_on_as_unattached() {
+        let files = vec![entry("a.rs", None)];
+        let review = stack_review();
+        let projection = ReviewProjection::scoped(&review, &files, FileFilter::All, scope());
+        assert_eq!(
+            projection.placements().len(),
+            review.comments.len(),
+            "parallel"
+        );
+        assert_eq!(
+            projection.counts_for("a.rs"),
+            FileCounts { todo: 2, total: 2 },
+            "legacy + selected; other and gone do not count on the file"
+        );
+        assert_eq!(projection.review_only(), FileCounts { todo: 0, total: 1 });
+        assert_eq!(
+            projection.unattached(),
+            FileCounts { todo: 2, total: 3 },
+            "gone.rs + two was-on comments"
+        );
+        assert_eq!(projection.was_on(), FileCounts { todo: 2, total: 2 });
+        assert_eq!(projection.untargeted(), FileCounts { todo: 1, total: 1 });
+        assert_eq!(projection.selected(), Some(&branch("auth-2")));
+        assert_eq!(
+            projection.target_counts(),
+            &[
+                TargetCounts {
+                    id: branch("auth-1"),
+                    counts: FileCounts { todo: 1, total: 1 }
+                },
+                TargetCounts {
+                    id: branch("auth-2"),
+                    counts: FileCounts { todo: 1, total: 3 }
+                },
+                TargetCounts {
+                    id: TargetId::Stack,
+                    counts: FileCounts::default()
+                },
+            ],
+            "own comments only, in live order"
+        );
+        let ids: Vec<&str> = projection
+            .file_comments("a.rs")
+            .iter()
+            .map(|p| p.comment.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["c-legacy", "c-selected"]);
+    }
+
+    #[test]
+    fn scoped_overview_lists_review_then_unattached_with_was_on_badges() {
+        let files = vec![entry("a.rs", None)];
+        let review = stack_review();
+        let projection = ReviewProjection::scoped(&review, &files, FileFilter::All, scope());
+        let overview: Vec<(&str, bool, Option<&str>)> = projection
+            .overview()
+            .iter()
+            .map(|o| (o.comment.id.as_str(), o.unattached, o.was_on))
+            .collect();
+        assert_eq!(
+            overview,
+            vec![
+                ("c-review", false, None),
+                ("c-gone", true, Some("auth-0")),
+                ("c-review-gone", true, Some("worktree")),
+                ("c-unattached", true, None),
+            ]
+        );
+        let snapshot = projection.snapshot(&BTreeSet::new());
+        let json = serde_json::to_value(&snapshot).expect("json");
+        assert_eq!(
+            json["selected"],
+            serde_json::json!({"kind": "branch", "name": "auth-2"})
+        );
+        assert_eq!(json["targetCounts"][1]["counts"]["total"], 3);
+        assert_eq!(json["untargetedComments"], 1);
+        assert_eq!(json["wasOnComments"], 2);
+        assert_eq!(json["overview"][1]["wasOn"], "auth-0");
+        assert_eq!(json["overview"][3]["wasOn"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn unscoped_projection_equals_the_empty_scope_and_shows_every_comment() {
+        let files = vec![entry("a.rs", None)];
+        let review = stack_review();
+        let plain = ReviewProjection::new(&review, &files, FileFilter::All);
+        let empty =
+            ReviewProjection::scoped(&review, &files, FileFilter::All, TargetScope::default());
+        assert_eq!(plain.placements(), empty.placements());
+        assert_eq!(plain.counts_for("a.rs"), FileCounts { todo: 4, total: 4 });
+        assert_eq!(plain.was_on(), FileCounts::default());
+        assert!(plain.target_counts().is_empty());
+        assert_eq!(plain.selected(), None);
+        let snapshot = plain.snapshot(&BTreeSet::new());
+        assert_eq!(snapshot.selected, None);
+        assert_eq!(snapshot.was_on_comments, 0);
     }
 
     #[test]

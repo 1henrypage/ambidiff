@@ -9,6 +9,13 @@
 //! silently dropped. Within a file, the recorded line either matches its
 //! captured snippet (normal), mismatches (outdated badge), sits inside a
 //! collapsed gap (anchored to the gap), or is gone entirely (clamped).
+//!
+//! In a stack review placement is also scoped to the selected target
+//! ([`TargetScope`]): a comment made on another PR of the stack is hidden
+//! from this one (`OtherTarget`), and a comment whose branch has left the
+//! stack (merged, deleted) joins the unattached group with a "was on"
+//! badge from every target (`WasOn`), never silently dropped. Comments
+//! without a target (legacy, or non-stack reviews) place by path everywhere.
 
 use serde::Serialize;
 
@@ -16,6 +23,7 @@ use crate::model::FileEntry;
 use crate::projection::PlacedComment;
 use crate::review::{Comment, Side, snippet_matches};
 use crate::rows::{CellKind, Row};
+use crate::stack::TargetId;
 
 /// Review-wide placement of one comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -32,33 +40,78 @@ pub enum Placement {
     },
     /// No current file matches (deleted, or renamed beyond git's detection).
     Unattached,
+    /// Made on a live target other than the selected one: hidden here,
+    /// visible when that target is selected.
+    OtherTarget,
+    /// Made on a target that is no longer in the stack: shown in the
+    /// unattached group with a "was on <label>" badge, from every target.
+    WasOn { target: TargetId },
+}
+
+/// The selection a projection is scoped to: the target being viewed and
+/// every target the stack currently has. The empty scope (no selection)
+/// places every comment by path, which is the non-stack behaviour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetScope {
+    pub selected: Option<TargetId>,
+    pub live: Vec<TargetId>,
+}
+
+impl TargetScope {
+    pub fn is_live(&self, target: &TargetId) -> bool {
+        self.live.contains(target)
+    }
+}
+
+/// Place one comment by path alone (no target scoping).
+fn place_by_path(comment: &Comment, files: &[FileEntry]) -> Placement {
+    let Some(path) = &comment.path else {
+        return Placement::Review;
+    };
+    if files.iter().any(|f| &f.path == path) {
+        return Placement::File {
+            path: path.clone(),
+            was_path: None,
+        };
+    }
+    if let Some(renamed) = files
+        .iter()
+        .find(|f| f.old_path.as_deref() == Some(path.as_str()))
+    {
+        return Placement::File {
+            path: renamed.path.clone(),
+            was_path: Some(path.clone()),
+        };
+    }
+    Placement::Unattached
 }
 
 /// Place every comment against the current changed-file list. The result is
-/// parallel to `comments`.
+/// parallel to `comments`. Equivalent to [`place_comments_scoped`] with the
+/// empty scope.
 pub fn place_comments(comments: &[Comment], files: &[FileEntry]) -> Vec<Placement> {
+    place_comments_scoped(comments, files, &TargetScope::default())
+}
+
+/// Place every comment against the changed-file list of the selected
+/// target. The result stays PARALLEL to `comments` (the index contract the
+/// TUI and the wasm painter rely on). Per comment: no selection, no
+/// target, or the selected target places by path; a different live target
+/// is `OtherTarget`; a target that is not live is `WasOn`.
+pub fn place_comments_scoped(
+    comments: &[Comment],
+    files: &[FileEntry],
+    scope: &TargetScope,
+) -> Vec<Placement> {
     comments
         .iter()
-        .map(|comment| {
-            let Some(path) = &comment.path else {
-                return Placement::Review;
-            };
-            if files.iter().any(|f| &f.path == path) {
-                return Placement::File {
-                    path: path.clone(),
-                    was_path: None,
-                };
-            }
-            if let Some(renamed) = files
-                .iter()
-                .find(|f| f.old_path.as_deref() == Some(path.as_str()))
-            {
-                return Placement::File {
-                    path: renamed.path.clone(),
-                    was_path: Some(path.clone()),
-                };
-            }
-            Placement::Unattached
+        .map(|comment| match (&scope.selected, &comment.target) {
+            (None, _) | (_, None) => place_by_path(comment, files),
+            (Some(selected), Some(target)) if selected == target => place_by_path(comment, files),
+            (Some(_), Some(target)) if scope.is_live(target) => Placement::OtherTarget,
+            (Some(_), Some(target)) => Placement::WasOn {
+                target: target.clone(),
+            },
         })
         .collect()
 }
@@ -381,6 +434,79 @@ mod tests {
             }
         );
         assert_eq!(placements[3], Placement::Unattached);
+    }
+
+    fn tagged(id: &str, path: Option<&str>, target: Option<TargetId>) -> Comment {
+        let mut c = comment(id, path, None, None);
+        c.target = target;
+        c
+    }
+
+    fn branch(name: &str) -> TargetId {
+        TargetId::Branch { name: name.into() }
+    }
+
+    #[test]
+    fn scoped_placement_partitions_and_stays_parallel() {
+        let files = vec![entry("src/a.rs", None)];
+        let comments = vec![
+            tagged("c-legacy", Some("src/a.rs"), None),
+            tagged("c-selected", Some("src/a.rs"), Some(branch("auth-2"))),
+            tagged("c-other", Some("src/a.rs"), Some(branch("auth-1"))),
+            tagged("c-gone", Some("src/a.rs"), Some(branch("auth-0"))),
+            tagged("c-review-other", None, Some(TargetId::Stack)),
+            tagged("c-review-gone", None, Some(TargetId::Worktree)),
+            tagged("c-unattached", Some("gone.rs"), Some(branch("auth-2"))),
+        ];
+        let scope = TargetScope {
+            selected: Some(branch("auth-2")),
+            live: vec![branch("auth-1"), branch("auth-2"), TargetId::Stack],
+        };
+        let placements = place_comments_scoped(&comments, &files, &scope);
+        assert_eq!(placements.len(), comments.len(), "parallel to comments");
+        let file = Placement::File {
+            path: "src/a.rs".into(),
+            was_path: None,
+        };
+        assert_eq!(placements[0], file, "legacy comments show everywhere");
+        assert_eq!(placements[1], file);
+        assert_eq!(placements[2], Placement::OtherTarget);
+        assert_eq!(
+            placements[3],
+            Placement::WasOn {
+                target: branch("auth-0")
+            }
+        );
+        assert_eq!(placements[4], Placement::OtherTarget);
+        assert_eq!(
+            placements[5],
+            Placement::WasOn {
+                target: TargetId::Worktree
+            }
+        );
+        assert_eq!(placements[6], Placement::Unattached);
+
+        // No selection: targets are ignored and everything places by path.
+        let unscoped = place_comments_scoped(&comments, &files, &TargetScope::default());
+        assert_eq!(unscoped, place_comments(&comments, &files));
+        assert_eq!(unscoped[2], file);
+        assert_eq!(unscoped[3], file);
+        assert_eq!(unscoped[4], Placement::Review);
+    }
+
+    #[test]
+    fn scoped_placement_serialises_its_new_kinds() {
+        assert_eq!(
+            serde_json::to_value(Placement::OtherTarget).expect("json"),
+            serde_json::json!({"kind": "otherTarget"})
+        );
+        assert_eq!(
+            serde_json::to_value(Placement::WasOn {
+                target: branch("auth-0")
+            })
+            .expect("json"),
+            serde_json::json!({"kind": "wasOn", "target": {"kind": "branch", "name": "auth-0"}})
+        );
     }
 
     #[test]
